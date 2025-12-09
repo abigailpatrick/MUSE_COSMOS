@@ -1,14 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=build_cube
+#SBATCH --job-name=build_var_cube
 #SBATCH --partition=all
-#SBATCH --output=build_cube_%j.log
-#SBATCH --error=build_cube_%j.err
+#SBATCH --output=build_var_cube_%j.log
+#SBATCH --error=build_var_cube_%j.err
 #SBATCH --time=6:00:00
 #SBATCH --mem=480G
 #SBATCH --cpus-per-task=1
 
 # Load Python
-. /usr/local/anaconda/3.9/etc/profile.d/conda.sh
+# CHANGE FILE NAMES IN MAIN SCRIPT BEFORE RUNNING - also job names above
+. /usr/local/anaconda/3.13/etc/profile.d/conda.sh
 conda activate env39
 
 cd /cephfs/apatrick/musecosmos/scripts/

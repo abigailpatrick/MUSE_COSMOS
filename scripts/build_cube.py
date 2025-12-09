@@ -41,6 +41,8 @@ import pandas as pd
 from astropy.io import fits
 from mpdaf.obj import Cube, WCS, WaveCoord
 
+## CHANGE THE FILENAMES BEFORE RUNNING!!!!!!
+
 
 def parse_args():
     """Parse command-line arguments."""
@@ -60,7 +62,7 @@ def parse_args():
     parser.add_argument(
         "--output",
         type=str,
-        default="/cephfs/apatrick/musecosmos/scripts/aligned/mosaics/big_cube/MEGA_CUBE.fits",
+        default="/cephfs/apatrick/musecosmos/scripts/aligned/mosaics/big_cube/MEGA_CUBE_VAR.fits", # Note the bunit and list fits files starts with are changed for var as well
         help="Output path for the combined cube.",
     )
     parser.add_argument(
@@ -99,7 +101,7 @@ def load_slice_fits(fits_path):
 
 def list_fits_files(fits_dir, start_id=None, end_id=None):
     """List and filter FITS files by optional slice ID range."""
-    fits_files = [f for f in os.listdir(fits_dir) if f.startswith("mosaic_slice_") and f.endswith(".fits")]
+    fits_files = [f for f in os.listdir(fits_dir) if f.startswith("var_mosaic_slice_") and f.endswith(".fits")] # added var_ for varinace cube
     filtered = []
 
     for f in fits_files:
@@ -259,7 +261,7 @@ def main():
         mpdaf_hdu = hdul[1]
 
         # --- Ensure BUNIT is set explicitly in HDU 0 ---
-        mpdaf_hdu.header['BUNIT'] = '10**(-20)*erg/s/cm**2/Angstrom'
+        mpdaf_hdu.header['BUNIT'] = '(10**(-20)*erg/s/cm**2/Angstrom)**2' # squared units for variance
 
         # Promote to PrimaryHDU
         primary_hdu = fits.PrimaryHDU(data=mpdaf_hdu.data, header=mpdaf_hdu.header)

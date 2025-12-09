@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+"""
+muse_slice_var_and_vap_mosaic.py
+
+Create:
+ - inverse-variance combined variance mosaic (from STAT HDU,)
+ - background-derived variance (VAP) mosaic (from DATA HDU using photutils.Background2D)
+
+Both mosaics are saved to FITS and optionally plotted.
+
+"""
+
 import os
 import argparse
 import csv
@@ -13,9 +25,10 @@ from astropy.wcs import WCS
 from astropy.visualization import simple_norm
 from reproject.mosaicking import find_optimal_celestial_wcs
 from reproject import reproject_adaptive
+from astropy.stats import SigmaClip
+from photutils.background import Background2D, MedianBackground
 
-
-start_time = time.time()  # record start
+start_time = time.time()
 
 
 def parse_args():
@@ -28,14 +41,20 @@ def parse_args():
     parser.add_argument('--slice', type=int, required=True,
                         help='Wavelength slice to extract from each cube (0-indexed)')
     parser.add_argument('--output_file', type=str, required=True,
-                        help='Output FITS file path for the summed-variance mosaic')
+                        help='Output FITS file path for the summed-variance mosaic (base name)')
     parser.add_argument('--mask_percent', type=float, default=1.0,
                         help='Percentage of lowest pixels to mask (default 1.0); must match white-light mask creation step')
     parser.add_argument('--plotting', action='store_true',
-                        help='Enable plotting of the variance mosaic')
+                        help='Enable plotting of the variance & VAP mosaics')
     parser.add_argument('--tmp_dir', type=str,
                         default='/cephfs/apatrick/musecosmos/scripts/aligned/tmp_slice_var',
                         help='Temporary directory for reprojected slices')
+    parser.add_argument('--box_size', type=int, default=50,
+                        help='Box size (pixels) for Background2D VAP estimation (default 50)')
+    parser.add_argument('--filter_size', type=int, default=3,
+                        help='Median filter size for Background2D (default 3)')
+    parser.add_argument('--sigma_clip', type=float, default=3.0,
+                        help='Sigma for sigma-clipping used by Background2D (default 3.0)')
 
     return parser.parse_args()
 
@@ -84,6 +103,21 @@ def var_slice(cubes, slice_number):
         with fits.open(cube.cube_path) as hdul:
             data = hdul[2].data[slice_number]
             header = hdul[2].header.copy()
+            wcs2d = WCS(header).celestial
+            out[cube.file_id] = {'data': data, 'wcs': wcs2d, 'wcs_e': header}
+    return out
+
+
+def data_slice(cubes, slice_number):
+    """
+    Extract a 2D data slice from each cube (HDU 1: DATA).
+    Returns dict: {file_id: {'data': 2D array, 'wcs': celestial WCS, 'wcs_e': full header}}
+    """
+    out = {}
+    for cube in cubes:
+        with fits.open(cube.cube_path) as hdul:
+            data = hdul[1].data[slice_number]
+            header = hdul[1].header.copy()
             wcs2d = WCS(header).celestial
             out[cube.file_id] = {'data': data, 'wcs': wcs2d, 'wcs_e': header}
     return out
@@ -170,12 +204,11 @@ def common_wcs_area(aligned_slices):
 
 def reproject_and_save_single(i, slice_dict, wcs_out, shape_out, output_dir):
     """
-    Reproject a single aligned slice (variance) onto common WCS and save.
+    Reproject a single aligned slice (variance or data) onto common WCS and save.
     """
     os.makedirs(output_dir, exist_ok=True)
     data, wcs = slice_dict['data'], slice_dict['wcs'].celestial
 
-    # Using same reprojection method as data path - I should maybe try false for conserve_flux?
     array, _ = reproject_adaptive((data, wcs), output_projection=wcs_out,
                                   shape_out=shape_out, conserve_flux=False)
 
@@ -189,32 +222,21 @@ def _map_reproject_and_save(args):
     return reproject_and_save_single(*args)
 
 
-def reproject_and_save_slices(aligned_slices, wcs_out, shape_out, output_dir):
+def reproject_and_save_slices(aligned_slices, wcs_out, shape_out, output_dir, max_workers=8):
     """
     Parallel reprojection of all slices. Returns list of file paths.
     """
     os.makedirs(output_dir, exist_ok=True)
     args_list = [(i, s, wcs_out, shape_out, output_dir) for i, s in enumerate(aligned_slices)]
-    with ProcessPoolExecutor(max_workers=8) as executor:
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         file_list = list(executor.map(_map_reproject_and_save, args_list))
     return file_list
 
 
 def variance_sum_from_files(file_list):
     """
-    Combine reprojected variance slices using inverse-variance summation.
-
-    For each pixel position across all input variance maps:
-      - Compute the sum of inverse variances:  inv_sum = Σ (1 / var_i)
-        where var_i are valid (finite and > 0) variance values from each exposure.
-      - The combined variance is then given by:  combined_var = 1 / inv_sum
-        if inv_sum > 0, otherwise it is set to NaN.
-
-    This calculation returns the propagated variance that corresponds to an
-    inverse-variance–weighted mean of the underlying data values.
-    It naturally decreases in regions of overlap where multiple exposures
-    contribute, reflecting higher confidence (lower uncertainty) there.
-
+    Combine reprojected variance slices using inverse-variance summation (1/sum(1/var)).
+    Returns combined_var (2D array) and WCS built from the first file header.
     """
     sum_inv = None
     first_header = None
@@ -246,6 +268,42 @@ def variance_sum_from_files(file_list):
     return combined_var, wcs
 
 
+def background_variance_map(data, box_size=(30, 30), filter_size=(5, 5), sigma=3.0):
+    """
+    Estimate a 2D background-based variance map for a given MUSE slice
+    using photutils.Background2D (sigma-clipped, no explicit source mask).
+
+    Input:
+      data : 2D image (flux) array
+      box_size : int or tuple (box y, box x)
+      filter_size : int or tuple for median filtering of the low-res grid
+      sigma : sigma for SigmaClip
+
+    Returns:
+      var_map : 2D numpy.ndarray (variance = background_rms^2, same shape as data)
+      bkg_rms : 2D numpy.ndarray (background RMS)
+      bkg_obj : Background2D object (for diagnostics)
+    """
+    # Replace NaNs with zeros for Background2D input (ignored in stats)
+    indata = np.array(data, dtype=float)
+    indata = np.nan_to_num(indata, nan=0.0, posinf=0.0, neginf=0.0)
+
+    sigma_clip = SigmaClip(sigma=sigma, maxiters=10)
+    bkg_estimator = MedianBackground()
+
+    bkg = Background2D(
+        indata,
+        box_size=box_size,
+        filter_size=(filter_size, filter_size) if isinstance(filter_size, int) else filter_size,
+        sigma_clip=sigma_clip,
+        bkg_estimator=bkg_estimator,
+        edge_method='pad'
+    )
+
+    bkg_rms = bkg.background_rms
+    var_map = bkg_rms ** 2
+    return var_map, bkg_rms, bkg
+
 
 def save_variance_mosaic(mosaic, mosaic_wcs, output_file, file_ids, offsets, a_m, wcs_e):
     """
@@ -253,7 +311,7 @@ def save_variance_mosaic(mosaic, mosaic_wcs, output_file, file_ids, offsets, a_m
     """
     mosaic_header = mosaic_wcs.to_header()
 
-    # Merge non-spectral header keys from the variance HDU
+    # Merge non-spectral header keys from the variance HDU header object
     for card in wcs_e.cards:
         key = card.keyword
         value = card.value
@@ -267,10 +325,8 @@ def save_variance_mosaic(mosaic, mosaic_wcs, output_file, file_ids, offsets, a_m
         elif key not in mosaic_header:
             mosaic_header[key] = value
 
-    # Annotate that this is a variance sum
     mosaic_header.add_history("Variance mosaic created by summing STAT (HDU 2) slices after reprojection.")
     mosaic_header['VARCOMB'] = ('INVVAR', 'Variance combined via inverse-variance weighting (1/sum(1/var))')
-
 
     hdu = fits.PrimaryHDU(data=mosaic, header=mosaic_header)
     for i, (fid, off, typ) in enumerate(zip(file_ids, offsets, a_m), 1):
@@ -282,29 +338,196 @@ def save_variance_mosaic(mosaic, mosaic_wcs, output_file, file_ids, offsets, a_m
     print(f"Saved variance mosaic to {output_file}")
 
 
-def plot_mosaic(mosaic, slice_wavelength, output_path=None):
+def save_vap_mosaic(vap_map, mosaic_wcs, output_file, file_ids, offsets, a_m, wcs_e):
     """
-    Plot the variance mosaic image for a specific slice and save it.
+    Save the background-derived variance (VAP) map to FITS with provenance.
+    """
+    mosaic_header = mosaic_wcs.to_header()
+
+    # Merge non-spectral header keys from original header
+    for card in wcs_e.cards:
+        key = card.keyword
+        value = card.value
+        if key.endswith('3'):
+            continue
+        if key == 'COMMENT' and value is not None:
+            mosaic_header.add_comment(str(value))
+        elif key == 'HISTORY' and value is not None:
+            mosaic_header.add_history(str(value))
+        elif key not in mosaic_header:
+            mosaic_header[key] = value
+
+    mosaic_header.add_history("Background-derived variance (VAP) map computed with photutils.Background2D.")
+    mosaic_header['VARCOMB'] = ('BKG', 'Variance derived from empirical background noise (RMS^2).')
+
+    hdu = fits.PrimaryHDU(data=vap_map, header=mosaic_header)
+    for i, (fid, off, typ) in enumerate(zip(file_ids, offsets, a_m), 1):
+        hdu.header[f'FILE{i}'] = fid
+        hdu.header[f'OFF{i}'] = str(off)
+        hdu.header[f'TYPE{i}'] = typ
+
+    hdu.writeto(output_file, overwrite=True)
+    print(f"Saved VAP mosaic to {output_file}")
+
+
+def plot_mosaic(mosaic, slice_wavelength, output_path=None, title_extra=None, fname_suffix="var"):
+    """
+    Plot a mosaic (variance or vap) and save PNG.
     """
     if output_path is None:
         output_path = "/cephfs/apatrick/musecosmos/reduced_cubes/slices"
+    os.makedirs(output_path, exist_ok=True)
 
     norm = simple_norm(mosaic, 'sqrt', percent=99.5)
 
     plt.figure(figsize=(10, 8))
     plt.imshow(mosaic, origin='lower', cmap='viridis', norm=norm)
-    plt.title(f"Full Variance Mosaic of slice {round(slice_wavelength, 1)} Å - sum of variances")
+    title = f"{'Variance' if fname_suffix=='var' else 'Background-derived Variance '} Mosaic of slice {round(slice_wavelength,1)} Å"
+    if title_extra:
+        title += f" - {title_extra}"
+    plt.title(title)
     plt.xlabel("Pixel X")
     plt.ylabel("Pixel Y")
     plt.colorbar(label='Variance')
     plt.tight_layout()
 
-    os.makedirs(output_path, exist_ok=True)
-    output_png = os.path.join(output_path, f"mosaic_varsum_slice_{round(slice_wavelength, 1)}_full.png")
+    output_png = os.path.join(output_path, f"mosaic_{fname_suffix}_slice_{round(slice_wavelength, 1)}_full.png")
     plt.savefig(output_png, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Saved plot to {output_png}")
     return output_png
+
+def plot_ratio_histogram(vap_mosaic, var_mosaic, slice_wavelength, output_dir,
+                         bins=100, logx=False, clip_percentiles=(1, 99),
+                         fname_tag="ratio_vap_over_var", slice_index=None):
+    """
+    Plot a 1D line-only histogram of the pixel-wise ratio R = VAP / VAR.
+
+    Parameters
+    ----------
+    vap_mosaic : 2D ndarray
+    var_mosaic : 2D ndarray
+    slice_wavelength : float
+    output_dir : str
+    bins : int
+    logx : bool
+    clip_percentiles : (float, float) or None
+    fname_tag : str
+    slice_index : int or None
+        Optional slice index to include in filenames for easier aggregation.
+
+    Returns
+    -------
+    result : dict with stats and file paths
+    """
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    var = np.array(var_mosaic, dtype=float)
+    vap = np.array(vap_mosaic, dtype=float)
+
+    valid = np.isfinite(var) & np.isfinite(vap) & (var > 0.0) & (vap > 0.0)
+    if not np.any(valid):
+        raise RuntimeError("No valid pixels to compute ratio (check NaNs/zeros).")
+
+    R = vap[valid] / var[valid]
+
+    # Robust stats on the linear ratio R
+    median_R = float(np.nanmedian(R))
+    mad_R = float(1.4826 * np.nanmedian(np.abs(R - median_R)))  # robust sigma
+    p16, p50, p84 = [float(q) for q in np.nanpercentile(R, [16, 50, 84])]
+    N = int(R.size)
+
+    # Transform for plotting axis
+    if logx:
+        X = np.log10(R)
+        xlabel = "log10(VAP / VAR)"
+        v_med = np.log10(median_R) if median_R > 0 else np.nan
+        v_p16 = np.log10(p16) if p16 > 0 else np.nan
+        v_p84 = np.log10(p84) if p84 > 0 else np.nan
+    else:
+        X = R
+        xlabel = "VAP / VAR"
+        v_med, v_p16, v_p84 = median_R, p16, p84
+
+    # Percentile clipping for the plotted histogram (does not affect stats)
+    if clip_percentiles is not None:
+        lo_p, hi_p = np.nanpercentile(X, clip_percentiles)
+        Xplot = X[(X >= lo_p) & (X <= hi_p)]
+        clipped_range = (float(lo_p), float(hi_p))
+    else:
+        lo_p, hi_p = float(np.nanmin(X)), float(np.nanmax(X))
+        Xplot = X
+        clipped_range = (lo_p, hi_p)
+
+    # Compute histogram counts and edges with density normalization
+    counts, edges = np.histogram(Xplot, bins=bins, range=(lo_p, hi_p), density=True)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    # Plot as a line-only histogram (step line)
+    plt.figure(figsize=(8, 5))
+    plt.step(centers, counts, where='mid', color='steelblue', lw=2, label=f"median={median_R:.3g}")
+    # Overplot median line in the same x-space for reference
+    if np.isfinite(v_med):
+        plt.axvline(v_med, color='crimson', ls='-', lw=1.5)
+
+    title = f"Histogram of VAP / VAR for slice {round(slice_wavelength,1)} Å  (N={N})"
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel("Probability density")
+    plt.legend(loc='best', frameon=False)
+    plt.tight_layout()
+
+    wave_tag = f"{round(slice_wavelength,1)}"
+    idx_tag = f"_slice{int(slice_index):04d}" if slice_index is not None else ""
+    suffix = "_log" if logx else ""
+    hist_png = os.path.join(output_dir, f"{fname_tag}{idx_tag}_{wave_tag}{suffix}.png")
+    plt.savefig(hist_png, dpi=200, bbox_inches='tight')
+    plt.close()
+
+    # Save histogram data for downstream overlay plotting
+    hist_npz = os.path.join(output_dir, f"{fname_tag}{idx_tag}{suffix}.npz")
+    np.savez_compressed(
+        hist_npz,
+        centers=centers,
+        counts=counts,
+        edges=edges,
+        slice_wavelength=slice_wavelength,
+        slice_index=(int(slice_index) if slice_index is not None else -1),
+        logx=int(logx),
+        clip_lo=clipped_range[0],
+        clip_hi=clipped_range[1],
+        N=N,
+        median_ratio=median_R,
+        mad_ratio=mad_R,
+        p16=p16, p50=p50, p84=p84
+    )
+
+    # Append stats CSV
+    stats_csv = os.path.join(output_dir, f"{fname_tag}_stats.csv")
+    header_needed = not os.path.exists(stats_csv)
+    with open(stats_csv, "a") as f:
+        if header_needed:
+            f.write("slice_index,slice_wavelength_A,N,median_ratio,mad_ratio,p16,p50,p84,clip_lo,clip_hi,logx\n")
+        f.write(f"{(slice_index if slice_index is not None else -1)},{slice_wavelength:.3f},{N},"
+                f"{median_R:.6g},{mad_R:.6g},{p16:.6g},{p50:.6g},{p84:.6g},"
+                f"{clipped_range[0]:.6g},{clipped_range[1]:.6g},{int(logx)}\n")
+
+    print(f"[Ratio] N={N} median(VAP/VAR)={median_R:.4g} MAD~={mad_R:.4g} (p16,p50,p84)=({p16:.4g},{p50:.4g},{p84:.4g})")
+    print(f"Suggested scale factor to bring VAR -> VAP: multiply VAR by {median_R:.4g}")
+    print(f"Saved line-histogram to {hist_png} and histogram data to {hist_npz}")
+
+    return {
+        'N': N,
+        'median_ratio': median_R,
+        'mad_ratio': mad_R,
+        'p16': p16,
+        'p50': p50,
+        'p84': p84,
+        'hist_png': hist_png,
+        'stats_csv': stats_csv,
+        'hist_npz': hist_npz
+    }
 
 
 def main():
@@ -323,71 +546,132 @@ def main():
     if len(cubes) == 0:
         raise RuntimeError(f"No matching _norm cubes found in {cubes_dir}. Check your paths.")
 
-    print("Checking wavelength alignment of slices")
+    # Validate wavelengths and collect slice_wavelength (use first cube for display)
+    slice_wavelength = None
     for cube in cubes:
         cube.cube_path = os.path.join(cubes_dir, f"DATACUBE_FINAL_{cube.file_id}_ZAP_norm.fits")
-        slice_wavelength = slice_wavelength_check(cube.cube_path, args.slice)
+        this_wave = slice_wavelength_check(cube.cube_path, args.slice)
+        if slice_wavelength is None:
+            slice_wavelength = this_wave
+        # write per-cube csv of wavelengths
         csv_filename = f"{int(args.slice)}_wave.csv"
         file_exists = os.path.isfile(csv_filename)
         with open(csv_filename, 'a', newline='') as csvfile:
             if not file_exists:
                 csvfile.write("file_id,slice,slice_wavelength\n")
-            csvfile.write(f"{cube.file_id},{args.slice},{slice_wavelength:.4f}\n")
+            csvfile.write(f"{cube.file_id},{args.slice},{this_wave:.4f}\n")
     print(f"Completed writing {int(args.slice)}_wave.csv")
 
-    # Extract variance slices from HDU 2
-    slices = var_slice(cubes, args.slice)
-    print(f"Extracted {len(slices)} variance slices (HDU 2).")
+    # Extract variance (HDU2) and data (HDU1) slices
+    var_slices = var_slice(cubes, args.slice)
+    data_slices = data_slice(cubes, args.slice)
+    print(f"Extracted {len(var_slices)} variance slices (HDU2) and corresponding data slices (HDU1).")
 
-    wcs_e = slices[cubes[0].file_id]['wcs_e']  # full header from STAT HDU
+    # Keep one STAT header for provenance
+    wcs_e = var_slices[cubes[0].file_id]['wcs_e']
 
     # Align via offsets
-    slice_data = [slices[c.file_id]['data'] for c in cubes]
-    slice_wcs = [slices[c.file_id]['wcs'] for c in cubes]
     offsets = [(c.x_offset, c.y_offset) for c in cubes]
-    aligned_slices = align_slices(slice_data, slice_wcs, offsets)
+
+    slice_var_data = [var_slices[c.file_id]['data'] for c in cubes]
+    slice_var_wcs = [var_slices[c.file_id]['wcs'] for c in cubes]
+    aligned_var = align_slices(slice_var_data, slice_var_wcs, offsets)
     print("Applied pixel offsets to variance slices.")
 
-    # Apply saved masks
+    slice_img_data = [data_slices[c.file_id]['data'] for c in cubes]
+    slice_img_wcs = [data_slices[c.file_id]['wcs'] for c in cubes]
+    aligned_data = align_slices(slice_img_data, slice_img_wcs, offsets)
+    print("Applied pixel offsets to data slices.")
+
+    # Apply saved masks to variance slices (keep data unmasked; VAP uses data)
     mask_dir = '/cephfs/apatrick/musecosmos/scripts/aligned/masks'
-    aligned_slices = apply_saved_masks(aligned_slices, cubes, mask_dir, args.mask_percent)
-    print(f"Applied {args.mask_percent}% masks to variance slices.")
+    aligned_var = apply_saved_masks(aligned_var, cubes, mask_dir, args.mask_percent)
+    print(f"Applied {args.mask_percent}% masks to variance slices (masks set to NaN).")
 
     # Find common WCS
-    wcs_out, shape_out = common_wcs_area(aligned_slices)
+    wcs_out, shape_out = common_wcs_area(aligned_var)
 
-    # Reproject all slices to common grid
+    # Reproject all slices to common grid (variance and data)
     tmp_dir = args.tmp_dir
     os.makedirs(tmp_dir, exist_ok=True)
     print("Reprojecting and saving aligned variance slices")
-    file_list = reproject_and_save_slices(aligned_slices, wcs_out, shape_out, tmp_dir)
+    var_file_list = reproject_and_save_slices(aligned_var, wcs_out, shape_out, tmp_dir)
 
-    # Sum variance across reprojected slices
-    mosaic_data, mosaic_wcs = variance_sum_from_files(file_list)
-    print(f"Created variance-sum mosaic from {len(file_list)} reprojected slices.")
+    print("Reprojecting and saving aligned data slices")
+    data_file_list = reproject_and_save_slices(aligned_data, wcs_out, shape_out, tmp_dir)
 
-    # Save mosaic
+    # Combine variance across reprojected slices (inverse-variance)
+    mosaic_data, mosaic_wcs = variance_sum_from_files(var_file_list)
+    print(f"Created variance-sum mosaic from {len(var_file_list)} reprojected slices.")
+
+    # Save and plot inverse-variance mosaic
     file_ids = [c.file_id for c in cubes]
     a_m = [c.flag for c in cubes]
     save_variance_mosaic(mosaic_data, mosaic_wcs, args.output_file, file_ids, offsets, a_m, wcs_e)
-
-    # Plot if requested
     if getattr(args, 'plotting', False):
         print(f"Plotting variance mosaic for slice {round(slice_wavelength, 1)} Å")
-        plot_mosaic(mosaic_data, slice_wavelength)
+        plot_mosaic(mosaic_data, slice_wavelength, fname_suffix="var", output_path=os.path.dirname(args.output_file))
+
+    # Build background-derived variance (VAP) mosaic from the reprojected data slices:
+    # Combine reprojected data slices into a single image (median to mitigate residual sources)
+    print("Building background (VAP) mosaic from reprojected data slices…")
+    # load arrays from reprojected data files and stack
+    reprojected_data_stack = []
+    for f in data_file_list:
+        arr = fits.getdata(f, memmap=True)
+        # treat infinite/NaN
+        arr = np.array(arr, dtype=float)
+        arr[~np.isfinite(arr)] = np.nan
+        reprojected_data_stack.append(arr)
+    if len(reprojected_data_stack) == 0:
+        raise RuntimeError("No reprojected data slices found to build VAP mosaic.")
+
+    # median combine along stack axis (ignore NaNs)
+    stacked = np.nanmedian(np.stack(reprojected_data_stack, axis=0), axis=0)
+
+    # estimate VAP map (RMS^2) using Background2D
+    vap_map, vap_rms, bkg_obj = background_variance_map(
+        stacked,
+        box_size=(args.box_size, args.box_size),
+        filter_size=(args.filter_size, args.filter_size),
+        sigma=args.sigma_clip
+    )
+
+    # Save VAP mosaic to file (use output_file base name)
+    vap_output_file = args.output_file.replace('.fits', '_vap.fits')
+    save_vap_mosaic(vap_map, mosaic_wcs, vap_output_file, file_ids, offsets, a_m, wcs_e)
+
+    # Plot VAP if requested
+    if getattr(args, 'plotting', False):
+        print(f"Plotting VAP mosaic for slice {round(slice_wavelength, 1)} Å")
+        plot_mosaic(vap_map, slice_wavelength, fname_suffix="vap", output_path=os.path.dirname(args.output_file))
+
+    # Histogram of scaling between VAP and VAR (ratio = VAP / VAR)
+    out_dir = os.path.dirname(args.output_file)
+    try:
+        plot_ratio_histogram(vap_map, mosaic_data, slice_wavelength, out_dir,
+                             bins=120, logx=False, clip_percentiles=(1, 99),
+                             slice_index=args.slice)
+        # Optional: also save a log10 histogram for readability
+        plot_ratio_histogram(vap_map, mosaic_data, slice_wavelength, out_dir,
+                             bins=120, logx=True, clip_percentiles=(1, 99),
+                             slice_index=args.slice)
+    except Exception as e:
+        print(f"WARNING: Failed to make ratio histogram: {e}")
+
 
     # Cleanup
     if os.path.exists(tmp_dir):
         shutil.rmtree(tmp_dir)
         print(f"Temporary directory {tmp_dir} removed.")
 
-    print(f"Finished variance slice {args.slice} processing.")
+    print(f"Finished variance + VAP mosaics for slice {args.slice} (λ = {round(slice_wavelength,1)} Å)")
 
     elapsed = time.time() - start_time
     hours = int(elapsed // 3600)
     minutes = int((elapsed % 3600) // 60)
     seconds = int(elapsed % 60)
-    print(f"\nVariance mosaic completed in {hours}h {minutes}m {seconds}s")
+    print(f"\nCompleted in {hours}h {minutes}m {seconds}s")
 
 
 if __name__ == "__main__":

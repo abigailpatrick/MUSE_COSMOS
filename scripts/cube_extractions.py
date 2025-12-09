@@ -62,7 +62,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Extract pseudo-narrowband images and 1D spectra from a MUSE cube for a list of objects.")
 
     parser.add_argument("--cube", type=str, 
-                        default="/cephfs/apatrick/musecosmos/scripts/aligned/mosaics/big_cube/MEGA_CUBE.fits", 
+                        default="/cephfs/apatrick/musecosmos/scripts/aligned/mosaics/big_cube/MEGA_CUBE_withFSF_VAR.fits", 
                         help="Path to the MUSE cube FITS file.")
     
     parser.add_argument("--objects", type=str,
@@ -70,11 +70,11 @@ def parse_args():
                         help="Path to a CSV file containing RA, Dec, and redshift (z).")
     
     parser.add_argument("--spatial_width", type=float, 
-                        default=30.0, 
+                        default=3.0, 
                         help="Spatial width for extraction in arcsec.")
 
     parser.add_argument("--spectral_width", type=float, 
-                        default=2000,
+                        default=800, # currently set in function to full wavelength need to taken that out to use this
                         help="Spectral width for subcube extraction in Angstroms (default is 600 Å).")
 
     parser.add_argument("--rest_wavelength", type=float,
@@ -89,7 +89,7 @@ def parse_args():
                         help="Radius for 1D spectrum aperture in arcsec (default is 1 arcsec).")
 
     parser.add_argument("--spectrum_width", type=float,
-                        default=2000,
+                        default=800.0,
                         help="Width around central wavelength for 1D spectrum in Angstroms (default is 600 Å).")
 
     parser.add_argument("--pixel_scale", type=float,
@@ -138,8 +138,12 @@ def extract_subcube(cube, x, y, obs_wavelength, spatial_width, spectral_width, p
     x_min, x_max = int(max(x-half_size, 0)), int(min(x+half_size, cube.shape[2]))
     y_min, y_max = int(max(y-half_size, 0)), int(min(y+half_size, cube.shape[1]))
 
-    wave_min = obs_wavelength.value - spectral_width / 4
-    wave_max = obs_wavelength.value + (spectral_width / 4) * 3
+    #wave_min = obs_wavelength.value - spectral_width / 4
+    #wave_max = obs_wavelength.value + (spectral_width / 4) * 3    # if you want to see other lines
+    wave_min = obs_wavelength.value - spectral_width / 2    # puts lya at centre of extraction range 
+    wave_max = obs_wavelength.value + spectral_width / 2
+    #wave_min = 4749.0  # full wavelength range of MUSE
+    #wave_max = 9351.18  # full wavelength range of MUSE
 
     # Check wavelength coverage
     if wave_max < cube.wave.coord()[0] or wave_min > cube.wave.coord()[-1]:
@@ -379,8 +383,10 @@ def create_spectrum(subcube, spectrum_radius, central_wavelength, spectrum_width
     # Define wavelength range
     central_wavelength = ensure_angstrom(central_wavelength)
     spectrum_width = ensure_angstrom(spectrum_width)
-    wave_min = central_wavelength - spectrum_width / 4
-    wave_max = central_wavelength + (spectrum_width / 4) * 3
+    #wave_min = central_wavelength - spectrum_width / 4
+    #wave_max = central_wavelength + (spectrum_width / 4) * 3
+    wave_min = central_wavelength - spectrum_width / 2
+    wave_max = central_wavelength + spectrum_width / 2
 
     # Extract spectral region
     spectrum = subcube.select_lambda(wave_min.value, wave_max.value)
@@ -397,6 +403,7 @@ def create_spectrum(subcube, spectrum_radius, central_wavelength, spectrum_width
     sigma_pix = sigma_A / dw        # convert sigma to pixel units
     spectrum_smooth = gaussian_filter1d(spectrum_1d, sigma_pix)
     smooth_color = "#B63DE2"  # colour for the smoothed spectrum
+
 
     # Plotting
     plt.figure(figsize=(12, 4))
@@ -434,6 +441,8 @@ def create_spectrum(subcube, spectrum_radius, central_wavelength, spectrum_width
     plt.savefig(output_path, dpi=300, pad_inches=0.2) # add , facecolor='black' for dark plot
     plt.close()
     print(f"Saved spectrum to {output_path}")
+
+
 
 
 def create_spectrum_with_inset(subcube, spectrum_radius, central_wavelength, spectrum_width,
@@ -913,8 +922,12 @@ def main():
     args = parse_args()
 
     # --- Load MUSE cube ---
-    cube = Cube(args.cube, ext=0, memmap=True)
+    cube = Cube(args.cube, ext=1, memmap=True) # 0 for original cube 1 for fixed to origin
     print("Full Cube Object Loaded")
+
+    # --- Load STAT cube ---
+    stat_cube = Cube(args.cube, ext='STAT', memmap=True)  # variance cube
+    print("STAT Cube Loaded")
 
     # --- Load object catalog ---
     df = pd.read_csv(args.objects)
@@ -923,7 +936,7 @@ def main():
 
     # --- Process each object ---
     for i, row in df.iterrows():
-        ra, dec, z , id, band = row['ra'], row['dec'], row['z1_median'], row['ID'], row['band']
+        ra, dec, z , Id, band = row['ra'], row['dec'], row['z1_median'], row['ID'], row['band']
         subcube_path = f"{args.output}source_{i+1}_subcube_{args.spatial_width}_{args.spectral_width}.fits"
 
         # Use existing subcube if available
@@ -938,18 +951,69 @@ def main():
 
             print(f"Object {i+1}: RA={ra:.6f}, Dec={dec:.6f}, z={z:.3f} → x={x:.1f}, y={y:.1f}, λ={obs_wavelength:.2f} Å")
 
-            subcube = extract_subcube(
-                cube, x, y, obs_wavelength,
-                spatial_width=args.spatial_width,
-                spectral_width=args.spectral_width,
-                pixel_scale=args.pixel_scale
-            )
+            # Extract flux subcube
+            flux_sub = extract_subcube(cube, x, y, obs_wavelength,
+                                    spatial_width=args.spatial_width,
+                                    spectral_width=args.spectral_width,
+                                    pixel_scale=args.pixel_scale)
+            if flux_sub is None:
+                continue
 
-            # Save extracted subcube
-            if subcube is not None:
-                subcube.write(subcube_path)
-                print(f"Saved subcube to {subcube_path}")
-        """ 
+            # Extract variance subcube using same slice
+            stat_sub = extract_subcube(stat_cube, x, y, obs_wavelength,
+                                    spatial_width=args.spatial_width,
+                                    spectral_width=args.spectral_width,
+                                    pixel_scale=args.pixel_scale)
+            if stat_sub is None:
+                continue
+
+            # Build HDUList with correct 3D WCS on DATA/STAT
+            data_hdr = flux_sub.data_header.copy()
+            stat_hdr = stat_sub.data_header.copy()
+
+            # Optional: remove NAXIS keywords to let astropy set them from data shape
+            for k in ('NAXIS', 'NAXIS1', 'NAXIS2', 'NAXIS3'):
+                data_hdr.pop(k, None)
+                stat_hdr.pop(k, None)
+
+            hdul = fits.HDUList([
+                # Keep primary header for metadata/FSF keywords (not for WCS)
+                fits.PrimaryHDU(header=flux_sub.primary_header),
+
+                fits.ImageHDU(
+                    data=flux_sub.data.filled(np.nan).astype(np.float32),
+                    header=data_hdr,
+                    name='DATA'
+                ),
+
+                fits.ImageHDU(
+                    data=stat_sub.data.filled(np.nan).astype(np.float32),
+                    header=stat_hdr,  # or use data_hdr.copy() to force identical WCS
+                    name='STAT'
+                ),
+            ])
+            hdul.writeto(subcube_path, overwrite=True)
+            # Note: this file has DATA and STAT only; DQ is not carried over.
+            subcube = Cube(subcube_path, ext='DATA') # use data going forwards
+
+        # --- Verify WCS and print checks (use DATA extension, not PRIMARY) ---
+        with fits.open(subcube_path) as hdul_check:
+            print(f"\nSubcube written: {subcube_path}")
+            hdul_check.info()
+
+            # FSF keywords (usually on PRIMARY)
+            fsf_keys = [k for k in hdul_check[0].header.keys() if 'FSF' in k]
+            if fsf_keys:
+                print("FSF keywords (PRIMARY):", {k: hdul_check[0].header[k] for k in fsf_keys})
+
+            # Compute approximate center world coords from DATA WCS
+            data_hdu = hdul_check['DATA']
+            w = WCS(data_hdu.header)
+            nz, ny, nx = data_hdu.data.shape
+            cx, cy, cz = (nx - 1) / 2.0, (ny - 1) / 2.0, (nz - 1) / 2.0
+            ra_c, dec_c, lam_c = w.all_pix2world(cx, cy, cz, 0)
+            print(f"Subcube center (DATA WCS): RA={ra_c:.6f} deg, Dec={dec_c:.6f} deg, λ={lam_c:.2f} Å\n")
+         
         if subcube is None:
             print(f"Skipping object {i+1}: out of cube bounds.")
             continue
@@ -1045,7 +1109,7 @@ def main():
         cutoutsize_primer = (int(args.spatial_width / primer_pixel_scale),
                         int(args.spatial_width / primer_pixel_scale))
         primer_cutout = plot_primer_rgb_cutout(
-            primer_path="/cephfs/apatrick/musecosmos/dataproducts/extractions/MEGA_CUBE_rgb.fits",  # update to your PRIMER file
+            primer_path="/cephfs/apatrick/musecosmos/dataproducts/extractions/MEGA_CUBE_rgb.fits",  # update to your PRIMER file /home/apatrick/P1/col.fits is the file but it gets error
             ra=ra,
             dec=dec,
             cutout_size=cutoutsize_primer,
@@ -1053,18 +1117,18 @@ def main():
         )
 
     # --- Combine all default outputs into a single PDF ---
-    save_combined_pdf(df, args.output, id, pdf_name=f"all_sources_combined_{args.spectral_width}.pdf")
+    save_combined_pdf(df, args.output, Id, pdf_name=f"all_sources_combined_{args.spectral_width}.pdf")
 
     # --- Manual wavelength adjustments ---
-    sources = [1, 3, 7, 8, 10, 11, 12, 13, 15, 16, 23]
+    sources = [1, 3, 4, 5, 7, 8, 10, 11, 12, 13, 15, 16, 23, 26]
     new_central_wavelengths = {
-        1: 8599, 3: 8609, 7: 8612, 8: 8635, 10: 8595,
-        11: 8620, 12: 8633, 13: 8598, 15: 8623, 16: 8581, 23: 8637
+        1: 8599, 3: 8609, 4: 8612, 5: 8614, 7: 8614, 8: 8635, 10: 8595,
+        11: 8620, 12: 8633, 13: 8598, 15: 8623, 16: 8581, 23: 8637, 26: 8660
     }
 
     for i in sources:
         row = df.iloc[i - 1]
-        ra, dec, z , id, band = row['ra'], row['dec'], row['z1_median'], row['ID'], row['band']
+        ra, dec, z , Id, band = row['ra'], row['dec'], row['z1_median'], row['ID'], row['band']
         subcube_path = f"{args.output}source_{i}_subcube.fits"
 
         if not os.path.exists(subcube_path):
@@ -1174,8 +1238,8 @@ def main():
 
 
     # --- Combine manual adjusted outputs into a single PDF ---
-    save_combined_pdf(df, args.output, id ,pdf_name=f"manual_adjustments_{args.spectral_width}.pdf", sources=sources, suffix="_manual")
-     """
+    save_combined_pdf(df, args.output, Id ,pdf_name=f"manual_adjustments_{args.spectral_width}.pdf", sources=sources, suffix="_manual")
+
 
 if __name__ == "__main__":
     main()

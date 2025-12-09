@@ -43,7 +43,7 @@ def parse_args():
 # STAR SELECTION
 # ======================
 
-def select_stars(hst_path, n_brightest=100):
+def select_stars(hst_path, n_brightest=50):
     """Select the brightest star candidates from HST catalog."""
     hst = Table.read(hst_path).to_pandas()
     star_candidates = hst[hst['CLASS_STAR'] > 0.9].copy()
@@ -125,42 +125,51 @@ def plot_fsf_fit(fsf, ra, dec):
 # FSF MODEL CREATION
 # ======================
 
-def get_cube_wave_range(cube_file):
-    """Get min and max wavelength from a MUSE cube header."""
-    with fits.open(cube_file) as hdul:
-        # Check which HDU has the cube; usually 1 if multi-extension
-        header = hdul[1].header if len(hdul) > 1 else hdul[0].header
-        crval = header['CRVAL3']    # reference wavelength
-        cdelt = header['CDELT3']    # step per pixel
-        crpix = header['CRPIX3']    # reference pixel
-        naxis3 = header['NAXIS3']   # number of spectral pixels
-        wave_min = crval + (1 - crpix) * cdelt
-        wave_max = crval + (naxis3 - crpix) * cdelt
+def get_wavelength_range(cube_path):
+    """Return simple (wave_min, wave_max) from cube header."""
+    with fits.open(cube_path) as hdul:
+        hdr = hdul[0].header
+        crval3 = hdr['CRVAL3']
+        crpix3 = hdr['CRPIX3']
+        cd3_3 = hdr['CD3_3']
+        naxis3 = hdr['NAXIS3']
+
+    wave_min = crval3 + (1 - crpix3) * cd3_3
+    wave_max = crval3 + (naxis3 - crpix3) * cd3_3
+
+    print(f"Wavelength range: {wave_min:.2f} – {wave_max:.2f} Å ({naxis3} slices)")
     return wave_min, wave_max
 
 
 def create_fsfmodel_from_df(df, cube_file):
     """
-    Create a FSFModel from a DataFrame of FSF fits.
+    Create an FSFModel (MoffatModel2) from a DataFrame of FSF fits.
     Uses median FWHM and BETA across sources.
     """
     # Median polynomials across stars
-    fwhm_polys = np.array(df['FWHM_poly'].tolist())  # shape (nstars, ncoeff)
+    fwhm_polys = np.array(df['FWHM_poly'].tolist())
     beta_polys = np.array(df['BETA_poly'].tolist())
     fwhm_median_poly = np.median(fwhm_polys, axis=0)
     beta_median_poly = np.median(beta_polys, axis=0)
 
-    # Get wavelength range
-    wave_min, wave_max = get_cube_wave_range(cube_file)
+    # Get wavelength range from cube header
+    wave_min, wave_max = get_wavelength_range(cube_file)
     print(f"Cube wavelength range: {wave_min:.2f} Å – {wave_max:.2f} Å")
 
-    # Create Moffat model
-    moffat = MoffatModel2(fwhm=fwhm_median_poly, beta=beta_median_poly)
+    # MUSE pixel scale (arcsec/pixel)
+    pixstep = 0.2
 
-    # Create FSFModel for the full cube wavelength range
-    fsfmodel = FSFModel(model=moffat, wave=[wave_min, wave_max])
+    # Create the Moffat FSF model directly
+    fsfmodel = MoffatModel2(
+        fwhm_pol=fwhm_median_poly,
+        beta_pol=beta_median_poly,
+        lbrange=(wave_min, wave_max),
+        pixstep=pixstep
+    )
 
     return fsfmodel
+
+
 
 # ======================
 # MAIN PIPELINE
@@ -210,9 +219,20 @@ def main():
     # Step 7: Create FSF model for ORIGIN
     print("\nCreating FSF model for the cube...")
     fsfmodel = create_fsfmodel_from_df(df, args.muse_cube)
-    fsfmodel_file = "muse_fsfmodel.fits"
-    fsfmodel.write(fsfmodel_file)
-    print(f"Saved FSF model to {fsfmodel_file}")
+
+    # Step 8: Embed FSF model in cube header for ORIGIN
+    print("Writing FSF model to cube header...")
+    fsf_hdr = fsfmodel.to_header()
+    cube.primary_header.extend(fsf_hdr, useblanks=False, update=True)
+    print(" FSF model in header:")
+    print(fsfmodel)
+
+
+    # Save new cube with FSF header
+    output_cube = args.muse_cube.replace(".fits", "_withFSF.fits")
+    cube.write(output_cube)
+    print(f"Saved MUSE cube with FSF model header to:\n{output_cube}")
+
 
 
 # ======================
