@@ -11,7 +11,7 @@ def inspect_muse_cube(cube_path):
     print(f"\nInspecting MUSE cube: {cube_path}\n")
 
     # Open FITS file
-    hdul = fits.open(cube_path)
+    hdul = fits.open(cube_path, ignore_missing_simple=True)
     print(f"Number of extensions: {len(hdul)}\n")
 
     # Print extension summary
@@ -39,6 +39,10 @@ def inspect_muse_cube(cube_path):
     print(f"Full data header:  {data_header}")
     print("\n Header from Primary HDU:")
     print(f"Full PRIMARY header:  {primary_header}")
+
+    # Print the size of the data cube
+    data_shape = hdul['DATA'].data.shape
+    print(f"\n DATA cube shape: {data_shape} (Z, Y, X)")
 
     # Optionally show first lines of full header (for context)
     print("\nFull PRIMARY header preview:")

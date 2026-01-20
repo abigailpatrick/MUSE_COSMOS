@@ -65,7 +65,7 @@ def parse_args():
                         default=1215.7, 
                         help="Rest-frame wavelength of the emission line in Angstroms (default is Lyman-alpha).")
     
-    parser.add_argument("--wavelengths", type=float, nargs='+', default=[1215.7, 1240.0, 1260.0, 1303, 1336, 1395, 1548.2],
+    parser.add_argument("--wavelengths", type=float, nargs='+', default=[1215.7],
                         help="List of rest-frame wavelengths of interest in Angstroms (default includes Lyα, NV, CIV).")
 
     parser.add_argument("--spectrum_radius", type=float,
@@ -139,6 +139,9 @@ def extract_subcube(cube, x, y, obs_wavelength, spatial_width, spectral_width, p
     if subcube.shape[1] == 0 or subcube.shape[2] == 0:
         print(f"Source outside spatial bounds: x={x}, y={y}")
         return None
+
+    # save subcube 
+    subcube.write(f"source.fits", overwrite=True)
     
     return subcube
 
@@ -206,7 +209,7 @@ def extract_aperture_spectra(flux_subcube, stat_subcube, spectrum_radius, centra
     sigma_pix = sigma_A / dw if dw and np.isfinite(dw) else 0.0
     if sigma_pix > 0:
         flux_smooth = gaussian_filter1d(flux_1d, sigma_pix)
-        noise_smooth = gaussian_filter1d(noise_1d, sigma_pix)
+        noise_smooth = gaussian_filter1d(noise_1d, 1.5)
     else:
         flux_smooth = flux_1d.copy()
         noise_smooth = noise_1d.copy()
@@ -222,40 +225,44 @@ def extract_aperture_spectra(flux_subcube, stat_subcube, spectrum_radius, centra
 def plot_flux_plus_noise(wave, flux_1d, noise_1d, flux_smooth, noise_smooth,
                          wave_min, wave_max, central_wavelength, b_region, wavelengths,
                          spectrum_radius, output_path):
-    plt.figure(figsize=(12, 4))
 
-    # Flux and noise
-    plt.step(wave, flux_1d, color='grey', where='mid', lw=1.0, alpha=0.7, label='Flux (aperture sum)')
-    plt.plot(wave, flux_smooth, color='#B63DE2', lw=1.8, alpha=0.9, label='Flux (smoothed)')
+    plt.figure(figsize=(12, 2.5))
 
-    plt.step(wave, noise_1d, color='royalblue', where='mid', lw=1.0, alpha=0.9, label='Noise = sqrt(Σ var)')
-    plt.plot(wave, noise_smooth, color='cyan', lw=1.8, alpha=0.9, label='Noise (smoothed)')
+    step = 3
+    plt.fill_between(wave,-noise_smooth,noise_smooth,color='grey',alpha=0.4,label='± Noise',zorder=0)
+    plt.step(wave[::step], flux_1d[::step],color='grey',where='mid',lw=1.2,alpha=0.95,label='Flux (aperture sum)',zorder=2)
 
-    # Band highlight
-    lymin = central_wavelength.value - b_region
-    lymax = central_wavelength.value + b_region
-    plt.axvspan(lymin, lymax, color='lightblue', alpha=0.15, label=f"±{b_region} Å")
+    plt.plot(wave, flux_smooth,color='purple',lw=1.5,alpha=0.8,label='Flux (smoothed)',zorder=3)
+
+   
 
     # Line markers
-    line_labels = ["Lyα", "N V", "Si II", "O I", "C II", "Si IV", "C IV"]
+    line_labels = ["Lyα"]
     for i, wl in enumerate(wavelengths):
         wl = wl.value if hasattr(wl, 'value') else wl
         if wl < wave_min or wl > wave_max:
             continue
         label = line_labels[i] if i < len(line_labels) else f"{wl:.1f} Å"
         plt.axvline(wl, color='orange', linestyle='--', lw=1.0, alpha=0.8)
-        plt.text(wl + 3, 0.95, label, color='orange', rotation=90, va='top', ha='left', transform=plt.gca().get_xaxis_transform())
+        plt.text(wl + 3, 0.95, label, color='orange', rotation=90, va='top', ha='left',
+                 transform=plt.gca().get_xaxis_transform())
+
+    lymin = central_wavelength.value - b_region
+    lymax = central_wavelength.value + b_region
+    plt.axvspan(lymin, lymax, color='lightblue',alpha=0.3,label=f"±{b_region} Å",zorder=1)
 
     plt.axhline(0, color='k', linestyle='--', lw=0.8, alpha=0.6)
     plt.xlabel("Wavelength [Å]")
-    plt.ylabel("Flux / Noise (same units)")
-    plt.title(f"Flux and Noise spectra (aperture {2*spectrum_radius:.1f}\" diameter)")
-    plt.xlim(wave_min, wave_max)
+    plt.ylabel(r"Flux Density [$10^{-20}$ erg s$^{-1}$ cm$^{-2}$ Å$^{-1}$]", labelpad=6)
+    plt.xlim(8300, 8900)
+    plt.ylim(-30,70)
     plt.legend(loc='best', frameon=False)
-    plt.tight_layout()
+    plt.tight_layout(rect=[0.08, 0.0, 1.0, 1.0])
     plt.savefig(output_path, dpi=300, pad_inches=0.2)
     plt.close()
+
     print(f"Saved flux+noise spectrum to {output_path}")
+
 
 
 def plot_snr(wave, snr_1d, snr_smooth, wave_min, wave_max, central_wavelength, b_region, wavelengths,

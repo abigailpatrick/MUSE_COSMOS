@@ -14,7 +14,7 @@ import os
 from astropy.io import fits
 
 
-path = "/cephfs/apatrick/musecosmos/dataproducts/extractions/source_7_subcube_30.0_2000.fits"
+path = "/cephfs/apatrick/musecosmos/dataproducts/extractions/source_13_subcube_30.0_2000.fits"
 with fits.open(path) as hdul:
     hdul.info()
     print("Data shape:", [hdu.data.shape if hdu.data is not None else None for hdu in hdul])
