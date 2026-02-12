@@ -226,6 +226,7 @@ def sanitize_table_for_fits(t):
 # ----------------------------
 def main():
     t = Table.read(input_fits)
+    print(t.colnames)
 
     ids = t['ID'] if 'ID' in t.colnames else np.arange(len(t))
 

@@ -22,8 +22,7 @@ sed470_path = "/home/apatrick/P1/JELSDP/JELS_F470N_Halpha_sfh_continuity_salim_v
 output_fits = "/home/apatrick/P1/JELSDP/combined_selected_sources.fits"
 
 # --- IDs to keep ---
-ids_to_keep = [1988, 2962, 3221, 3228, 4126, 4469, 4970, 5364, 5887, 
-               3535, 4820, 6680]
+ids_to_keep = [1988, 2144, 2962, 3221, 3228, 4126, 4970, 5364, 5887, 6456, 4419, 4820, 6680, 3297, 4469, 4873, 5049, 5120, 5446, 5849, 6906, 6938, 7479, 7650, 7654, 7902, 3535]
 
 def ensure_int_id(t):
     if 'ID' not in t.colnames:
