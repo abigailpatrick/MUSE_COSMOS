@@ -9,7 +9,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from astropy.cosmology import Planck18 as cosmo
 import astropy.units as u
-from astropy.table import Table, join
+from astropy.table import Table, join, vstack
+from scipy.stats import spearmanr, kendalltau
 
 
 # -------------------------------------------------
@@ -56,6 +57,11 @@ def flux_to_luminosity(flux, redshift):
     Output
         Luminosity in erg/s.
     """
+    flux = np.asarray(flux, dtype=float)
+    redshift = np.asarray(redshift, dtype=float)
+    if flux.size == 0 or redshift.size == 0:
+        return np.array([], dtype=float)
+
     flux_cgs = flux * 1e-20
     d_l = cosmo.luminosity_distance(redshift).to(u.cm).value
     return flux_cgs * 4 * np.pi * d_l**2
@@ -74,6 +80,8 @@ def flux_err_to_luminosity_err(flux_err, redshift):
     """
     flux_err = np.asarray(flux_err, dtype=float)
     redshift = np.asarray(redshift, dtype=float)
+    if flux_err.size == 0 or redshift.size == 0:
+        return np.array([], dtype=float)
 
     out = np.full_like(flux_err, np.nan, dtype=float)
     m = np.isfinite(flux_err) & np.isfinite(redshift)
@@ -154,6 +162,7 @@ def plot_lya_ha(
     detections_mask,
     upper_mask,
     y_upper,
+    ids=None,
     bg_x=None,
     bg_y=None,
     add_caseb=True,
@@ -192,6 +201,19 @@ def plot_lya_ha(
             zorder=2,
             label="detections",
         )
+        if ids is not None:
+            for xi, yi, sid in zip(x[detections_mask], y[detections_mask], ids[detections_mask]):
+                if np.isfinite(xi) and np.isfinite(yi) and xi > 0 and yi > 0:
+                    ax.annotate(
+                        str(int(sid)),
+                        xy=(xi, yi),
+                        xytext=(4, 4),
+                        textcoords="offset points",
+                        fontsize=7,
+                        color="black",
+                        alpha=0.8,
+                        zorder=3,
+                    )
 
     if np.any(upper_mask):
         ax.scatter(
@@ -205,6 +227,19 @@ def plot_lya_ha(
             label="upper limits",
         )
         draw_ul_arrows(ax, x[upper_mask], y_upper[upper_mask], frac=0.35, color="royalblue", alpha=ul_alpha)
+        if ids is not None:
+            for xi, yi, sid in zip(x[upper_mask], y_upper[upper_mask], ids[upper_mask]):
+                if np.isfinite(xi) and np.isfinite(yi) and xi > 0 and yi > 0:
+                    ax.annotate(
+                        str(int(sid)),
+                        xy=(xi, yi),
+                        xytext=(4, 4),
+                        textcoords="offset points",
+                        fontsize=7,
+                        color="royalblue",
+                        alpha=0.8,
+                        zorder=3,
+                    )
 
     if np.any(x[detections_mask | upper_mask] > 0):
         ax.set_xscale("log")
@@ -229,6 +264,41 @@ def plot_lya_ha(
     plt.close(fig)
     print(f"[OK] Saved {outpath}")
 
+def compute_correlations(x, y_det, y_ul, det_mask, ul_mask):
+    """
+    Compute Spearman (using measured values) and
+    Kendall (using 3σ upper limits for non-detections).
+
+    Returns:
+        rho, p_rho, tau, p_tau
+    """
+
+    # -------------------------------
+    # Spearman: use measured values
+    # -------------------------------
+    x_s = np.concatenate([x[det_mask], x[ul_mask]])
+    y_s = np.concatenate([y_det[det_mask], y_det[ul_mask]])
+
+    m_s = np.isfinite(x_s) & np.isfinite(y_s)
+    if np.sum(m_s) > 2:
+        rho, p_rho = spearmanr(x_s[m_s], y_s[m_s])
+    else:
+        rho, p_rho = np.nan, np.nan
+
+    # --------------------------------
+    # Kendall: use upper limits for UL
+    # --------------------------------
+    x_k = np.concatenate([x[det_mask], x[ul_mask]])
+    y_k = np.concatenate([y_det[det_mask], y_ul[ul_mask]])
+
+    m_k = np.isfinite(x_k) & np.isfinite(y_k)
+    if np.sum(m_k) > 2:
+        tau, p_tau = kendalltau(x_k[m_k], y_k[m_k])
+    else:
+        tau, p_tau = np.nan, np.nan
+
+    return rho, p_rho, tau, p_tau
+
 
 def plot_fesc_vs_property(
     tab,
@@ -242,6 +312,7 @@ def plot_fesc_vs_property(
     logx=False,
     xlim=None,
     ylim=None,
+    ids=None,
     sphinx_tab=None,
     sphinx_x_col=None,
     sphinx_y_col=None,
@@ -258,6 +329,17 @@ def plot_fesc_vs_property(
 
     det_mask = np.isfinite(x) & np.isfinite(y)
     ul_mask = np.isfinite(x) & np.isfinite(y_ul)
+
+    # -----------------------------------
+    # Compute correlations
+    # -----------------------------------
+    rho, p_rho, tau, p_tau = compute_correlations(
+        x,
+        y,
+        y_ul,
+        det_mask,
+        ul_mask,
+    )
 
     if logx:
         det_mask &= x > 0
@@ -297,6 +379,19 @@ def plot_fesc_vs_property(
                 edgecolor="none",
                 zorder=2,
             )
+        if ids is not None:
+            for xi, yi, sid in zip(x[det_mask], y[det_mask], ids[det_mask]):
+                if np.isfinite(xi) and np.isfinite(yi) and (not logx or xi > 0) and (not logy or yi > 0):
+                    ax.annotate(
+                        str(int(sid)),
+                        xy=(xi, yi),
+                        xytext=(4, 4),
+                        textcoords="offset points",
+                        fontsize=7,
+                        color="black",
+                        alpha=0.8,
+                        zorder=3,
+                    )
 
         ax.errorbar(
             x[det_mask],
@@ -321,6 +416,19 @@ def plot_fesc_vs_property(
             zorder=2,
         )
         draw_ul_arrows(ax, x[ul_mask], y_ul[ul_mask], frac=0.35, color="royalblue", alpha=0.55)
+        if ids is not None:
+            for xi, yi, sid in zip(x[ul_mask], y_ul[ul_mask], ids[ul_mask]):
+                if np.isfinite(xi) and np.isfinite(yi) and (not logx or xi > 0) and (not logy or yi > 0):
+                    ax.annotate(
+                        str(int(sid)),
+                        xy=(xi, yi),
+                        xytext=(4, 4),
+                        textcoords="offset points",
+                        fontsize=7,
+                        color="royalblue",
+                        alpha=0.8,
+                        zorder=3,
+                    )
 
     if logx and np.any(x[det_mask | ul_mask] > 0):
         ax.set_xscale("log")
@@ -334,6 +442,24 @@ def plot_fesc_vs_property(
         ax.set_xlim(*xlim)
     if ylim:
         ax.set_ylim(*ylim)
+
+    # -----------------------------------
+    # Annotate correlation coefficients
+    # -----------------------------------
+    textstr = (
+        r"$\rho$ = {:.2f} (p={:.2g})".format(rho, p_rho) + "\n" +
+        r"$\tau$ = {:.2f} (p={:.2g})".format(tau, p_tau)
+    )
+
+    ax.text(
+        0.05,
+        0.12,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+    )
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=300)
@@ -351,25 +477,52 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Lyα–Hα luminosity + f_esc analysis.")
     parser.add_argument("--lya-csv", required=True, help="Path to Lyα CSV (e.g., lya_flux_ap0p6.csv).")
-    parser.add_argument("--ha-fits", required=True, help="Path to Hα FITS table.")
+    parser.add_argument(
+        "--ha-fits",
+        required=True,
+        nargs="+",
+        help="One or more Hα FITS tables (e.g., F466N and F470N).",
+    )
     parser.add_argument("--out-dir", required=True, help="Output directory for plots.")
     parser.add_argument("--flux-mode", choices=["flux_fit", "flux_int"], default="flux_fit",
                         help="Which Lyα flux to use for detections.")
     parser.add_argument("--caseb", type=float, default=8.7, help="Case B ratio Lyα/Hα.")
     parser.add_argument("--sphinx-table", default=None, help="Optional SPHINX FITS table.")
     parser.add_argument("--aperture-tag", default="0p6", help="Aperture tag for titles.")
+    parser.add_argument("--remove-agn", action="store_true", help="Remove AGN contaminant IDs.")
+    parser.add_argument(
+        "--prop-fits",
+        nargs="+",
+        default=[
+            "/home/apatrick/P1/JELSDP/JELS_F466N_Halpha_cat_v1p0.fits",
+            "/home/apatrick/P1/JELSDP/JELS_F470N_Halpha_cat_v1p0.fits",
+        ],
+        help="One or more Halpha catalog FITS files that contain properties (Av_50, beta, M_UV_AB).",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
 
     lya_tab = Table.read(args.lya_csv, format="ascii.csv")
-    ha_tab = Table.read(args.ha_fits)
+    ha_tabs = [Table.read(p) for p in args.ha_fits]
+    if len(ha_tabs) == 1:
+        ha_tab = ha_tabs[0]
+    else:
+        ha_tab = vstack(ha_tabs, join_type="outer", metadata_conflicts="silent")
 
     lya_tab["ID"] = lya_tab["ID"].astype(int)
     ha_tab["ID"] = ha_tab["ID"].astype(int)
 
     tab = join(lya_tab, ha_tab, keys="ID", join_type="inner")
     print(f"[INFO] Matched rows = {len(tab)}")
+
+    if args.remove_agn:
+        ids_contam = [1988, 2394, 3962, 5887, 7164, 8303, 9336]
+        mask = np.isin(np.array(tab["ID"], dtype=int), ids_contam)
+        tab = tab[~mask]
+        print(f"[INFO] Removed AGN rows: {np.sum(mask)} | Remaining: {len(tab)}")
+
+    ids = np.asarray(tab["ID"], dtype=int)
 
     # Lyα flux choice
     lya_flux_det = as_float(tab, args.flux_mode)
@@ -404,12 +557,14 @@ def main():
     tab["lya_L_ul"] = lya_L_ul
 
     # Hα luminosities
-    HaL_unc = as_float(tab, "L_Ha_uncorr")
-    HaL_unc_err = as_float(tab, "L_Ha_uncorr_err")
-    HaL_ap = as_float(tab, "L_Ha_apcorr")
-    HaL_ap_err = as_float(tab, "L_Ha_apcorr_err")
-    HaL_dust = as_float(tab, "L_Ha_ap_dustcorr_line")
-    HaL_dust_err = as_float(tab, "L_Ha_ap_dustcorr_line_err")
+    HaL_unc = as_float(tab, "L_halpha_uncorr")
+    HaL_unc_err = as_float(tab, "L_halpha_err_uncorr")
+
+    HaL_ap = as_float(tab, "L_halpha_apcorr")
+    HaL_ap_err = as_float(tab, "L_halpha_err_apcorr")
+
+    HaL_dust = as_float(tab, "L_halpha_corr_v1")       # dust-corrected (line)
+    HaL_dust_err = as_float(tab, "L_halpha_err_corr_v1")
 
     caseb = args.caseb
 
@@ -458,7 +613,8 @@ def main():
         m_ul = is_nondet & np.isfinite(x) & np.isfinite(y_ul) & (x > 0) & (y_ul > 0)
         title = f"Lyα vs Hα ({label}) | {args.flux_mode} | ap={args.aperture_tag}"
         out = os.path.join(args.out_dir, f"Lya_vs_Ha_{suffix}_{args.aperture_tag}.png")
-        xlim = log_limits(np.concatenate([x[m_det], x[m_ul]]), pad=0.4)
+        xlim = log_limits(np.concatenate([x[m_det], x[m_ul]]), pad=0.25)
+        ylim = log_limits(np.concatenate([y[m_det], y_ul[m_ul]]), pad=0.25)
         plot_lya_ha(
             x, y, HaL_err, lya_L_err,
             xlabel=f"L(Hα) [{label}, erg s⁻¹]",
@@ -468,11 +624,12 @@ def main():
             detections_mask=m_det,
             upper_mask=m_ul,
             y_upper=y_ul,
+            ids=ids,
             bg_x=sphinx_Ha,
             bg_y=sphinx_Lya,
             add_caseb=True,
             xlim=xlim,
-            ylim=log_limits(np.concatenate([y[m_det], y_ul[m_ul]]), pad=0.8)
+            ylim=ylim,
         )
 
     # Plot flux–flux
@@ -497,17 +654,64 @@ def main():
         detections_mask=m_det,
         upper_mask=m_ul,
         y_upper=y_ul,
+        ids=ids,
         add_caseb=False,
     )
 
-    # f_esc vs properties (with upper limits)
-    if "E_BV_50" not in tab.colnames and "Av_50" in tab.colnames:
-        Rv = 4.05
-        tab["E_BV_50"] = as_float(tab, "Av_50") / Rv
+    # Load properties from the Halpha catalog FITS tables (F466N/F470N)
+    prop_tabs = [Table.read(p) for p in args.prop_fits]
+    if len(prop_tabs) == 1:
+        prop_tab = prop_tabs[0]
+    else:
+        prop_tab = vstack(prop_tabs, join_type="outer", metadata_conflicts="silent")
 
-    if "E_BV_50" in tab.colnames:
+    prop_tab["ID"] = prop_tab["ID"].astype(int)
+    # Keep first occurrence of each ID (IDs are expected to appear in only one table)
+    prop_ids = np.asarray(prop_tab["ID"], dtype=int)
+    _, uniq_idx = np.unique(prop_ids, return_index=True)
+    prop_tab = prop_tab[np.sort(uniq_idx)]
+
+    # Map properties to arrays aligned with the main table by ID
+    # Only keep properties requested for the f_esc plots.
+    prop_cols = ["Av_50", "beta", "M_UV_AB_uncorr", "sSFR_10Myr_50", "sSFR_100Myr_50", "Z_50"]
+    prop_ids = np.asarray(prop_tab["ID"], dtype=int)
+    sort_idx = np.argsort(prop_ids)
+    prop_ids_sorted = prop_ids[sort_idx]
+    tab_ids = np.asarray(tab["ID"], dtype=int)
+    pos = np.searchsorted(prop_ids_sorted, tab_ids)
+    match = (pos < len(prop_ids_sorted)) & (prop_ids_sorted[pos] == tab_ids)
+
+    prop_arrays = {}
+    for col in prop_cols:
+        if col not in prop_tab.colnames:
+            continue
+        col_vals = as_float(prop_tab, col)
+        col_vals_sorted = col_vals[sort_idx]
+        out = np.full(len(tab), np.nan, dtype=float)
+        out[match] = col_vals_sorted[pos[match]]
+        prop_arrays[col] = out
+
+    # Build a minimal table for property plotting only (does not modify main tab)
+    prop_plot_tab = Table()
+    prop_plot_tab["fesc_lya_dustcorr"] = tab["fesc_lya_dustcorr"]
+    prop_plot_tab["fesc_lya_dustcorr_err"] = tab["fesc_lya_dustcorr_err"]
+    prop_plot_tab["fesc_lya_dustcorr_ul"] = tab["fesc_lya_dustcorr_ul"]
+    if "M_star_50" in tab.colnames:
+        prop_plot_tab["M_star_50"] = as_float(tab, "M_star_50")
+    for col, arr in prop_arrays.items():
+        prop_plot_tab[col] = arr
+
+    print(prop_plot_tab.colnames)
+    # f_esc vs properties (with upper limits) from the Halpha catalogs
+    if "E_BV_50" not in prop_plot_tab.colnames and "Av_50" in prop_plot_tab.colnames:
+        Rv = 4.05  # Calzetti
+        prop_plot_tab["E_BV_50"] = as_float(prop_plot_tab, "Av_50") / Rv
+       
+
+    # 1) E(B-V)
+    if "E_BV_50" in prop_plot_tab.colnames:
         plot_fesc_vs_property(
-            tab,
+            prop_plot_tab,
             y_col="fesc_lya_dustcorr",
             y_err_col="fesc_lya_dustcorr_err",
             y_ul_col="fesc_lya_dustcorr_ul",
@@ -515,30 +719,107 @@ def main():
             xlabel="E(B-V)",
             out_path=os.path.join(args.out_dir, f"fesc_vs_EBV_{args.aperture_tag}.png"),
             logy=True,
+            ids=ids,
             sphinx_tab=sphinx_tab,
             sphinx_x_col="E_BV_median" if sphinx_tab is not None and "E_BV_median" in sphinx_tab.colnames else None,
             sphinx_y_col="fesc_lya" if sphinx_tab is not None and "fesc_lya" in sphinx_tab.colnames else None,
+            ylim=(1e-3, 1.05), 
+            xlim=(0, 0.2),
         )
 
-    for x_col, label, fname in [
-        ("M_star_50", r"log $(M_\star/M_\odot)$", "fesc_vs_Mstar"),
-        ("sSFR_100Myr_50", r"sSFR [yr$^{-1}$]", "fesc_vs_sSFR"),
-        ("SFR_ratio_50", "SFR ratio", "fesc_vs_SFRratio"),
-        ("size_50", "Half-light radius [kpc]", "fesc_vs_size"),
-    ]:
-        if x_col in tab.colnames:
-            plot_fesc_vs_property(
-                tab,
-                y_col="fesc_lya_dustcorr",
-                y_err_col="fesc_lya_dustcorr_err",
-                y_ul_col="fesc_lya_dustcorr_ul",
-                x_col=x_col,
-                xlabel=label,
-                out_path=os.path.join(args.out_dir, f"{fname}_{args.aperture_tag}.png"),
-                logy=True,
-                logx=True if "sSFR" in x_col or "SFR_ratio" in x_col else False,
-            )
+    # 2) A_V
+    if "Av_50" in prop_plot_tab.colnames:
+        plot_fesc_vs_property(
+            prop_plot_tab,
+            y_col="fesc_lya_dustcorr",
+            y_err_col="fesc_lya_dustcorr_err",
+            y_ul_col="fesc_lya_dustcorr_ul",
+            x_col="Av_50",
+            xlabel="A_V",
+            out_path=os.path.join(args.out_dir, f"fesc_vs_Av_{args.aperture_tag}.png"),
+            logy=True,
+            ids=ids,
+        )
+
+    # 3) UV beta slope
+    if "beta" in prop_plot_tab.colnames:
+        plot_fesc_vs_property(
+            prop_plot_tab,
+            y_col="fesc_lya_dustcorr",
+            y_err_col="fesc_lya_dustcorr_err",
+            y_ul_col="fesc_lya_dustcorr_ul",
+            x_col="beta",
+            xlabel=r"$\beta$",
+            out_path=os.path.join(args.out_dir, f"fesc_vs_beta_{args.aperture_tag}.png"),
+            logy=True,
+            ids=ids,
+        )
+
+    # 4) M_UV (uncorrected)
+    if "M_UV_AB_uncorr" in prop_plot_tab.colnames:
+        plot_fesc_vs_property(
+            prop_plot_tab,
+            y_col="fesc_lya_dustcorr",
+            y_err_col="fesc_lya_dustcorr_err",
+            y_ul_col="fesc_lya_dustcorr_ul",
+            x_col="M_UV_AB_uncorr",
+            xlabel=r"$M_{\rm UV}$ (AB, uncorr)",
+            out_path=os.path.join(args.out_dir, f"fesc_vs_Muv_{args.aperture_tag}.png"),
+            logy=True,
+            ids=ids,
+        )
+
+    # 5) sSFR (specific star formation rate)
+    if "sSFR_10Myr_50" in prop_plot_tab.colnames:
+        plot_fesc_vs_property(
+            prop_plot_tab,
+            y_col="fesc_lya_dustcorr",
+            y_err_col="fesc_lya_dustcorr_err",
+            y_ul_col="fesc_lya_dustcorr_ul",
+            x_col="sSFR_10Myr_50",
+            xlabel=r"$sSFR_{10\rm Myr}$",
+            out_path=os.path.join(args.out_dir, f"fesc_vs_sSFR_{args.aperture_tag}.png"),
+            logy=True,
+            ids=ids,
+        )
+    
+    # 6) sSFR (specific star formation rate)
+    if "sSFR_100Myr_50" in prop_plot_tab.colnames:
+        plot_fesc_vs_property(
+            prop_plot_tab,
+            y_col="fesc_lya_dustcorr",
+            y_err_col="fesc_lya_dustcorr_err",
+            y_ul_col="fesc_lya_dustcorr_ul",
+            x_col="sSFR_100Myr_50",
+            xlabel=r"$sSFR_{100\rm Myr}$",
+            out_path=os.path.join(args.out_dir, f"fesc_vs_sSFR_100Myr_{args.aperture_tag}.png"),
+            logy=True,
+            ids=ids,
+        )
+
+
+    # 7) Metallicity 
+    if "Z_50" in prop_plot_tab.colnames:
+        plot_fesc_vs_property(
+            prop_plot_tab,
+            y_col="fesc_lya_dustcorr",
+            y_err_col="fesc_lya_dustcorr_err",
+            y_ul_col="fesc_lya_dustcorr_ul",
+            x_col="Z_50",
+            xlabel=r"$Z_{50}$",
+            out_path=os.path.join(args.out_dir, f"fesc_vs_Z_{args.aperture_tag}.png"),
+            logy=True,
+            ids=ids,
+        )
 
 
 if __name__ == "__main__":
     main()
+
+
+"""
+python lya_ha_fesc_analysis.py   --lya-csv /cephfs/apatrick/musecosmos/scripts/sample_select/outputs/lya_flux_ap0p6.csv   --ha-fits  /home/apatrick/P1/JELSDP/F466N_with_LHa_Corey_method.fits   --out-dir /cephfs/apatrick/musecosmos/scripts/sample_select/   --flux-mode flux_fit   --aperture-tag 0p6   --sphinx-table 
+/home/apatrick/P1/JELSDP/sphinx_lya_ha_fesc_table.fits --prop-fits /home/apatrick/P1/JELSDP/JELS_F466N_Halpha_cat_v1p0.fits /home/apatrick/P1/JELSDP/JELS_F470N_Halpha_cat_v1p0.fits 
+
+
+"""

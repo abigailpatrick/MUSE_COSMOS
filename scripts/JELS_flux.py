@@ -17,6 +17,11 @@ import astropy.units as u
 input_fits  = "/home/apatrick/P1/JELSDP/combined_selected_sources.fits"
 output_fits = "/home/apatrick/P1/JELSDP/combined_selected_sources_with_LHa.fits"
 
+# --- External catalogues for comparison ---
+f466_cat_fits = "/home/apatrick/P1/JELSDP/JELS_F466N_Halpha_cat_v1p0.fits"
+f470_cat_fits = "/home/apatrick/P1/JELSDP/JELS_F470N_Halpha_cat_v1p0.fits"
+
+
 # ----------------------------
 # Utilities for safe extraction
 # ----------------------------
@@ -221,6 +226,106 @@ def sanitize_table_for_fits(t):
 
     return t2
 
+#-----------------------------
+# Catalog 2
+#-----------------------------
+def load_and_index_catalogue(path):
+    """
+    Load catalogue and return dict indexed by ID for quick matching.
+    """
+    cat = Table.read(path)
+    cat_ids = np.array(cat["ID"], dtype=int)
+
+    # Build lookup: ID → row index
+    id_to_row = {id_: i for i, id_ in enumerate(cat_ids)}
+
+    return cat, id_to_row
+
+def compare_with_external_catalogues(t, f466_path, f470_path):
+    """
+    Compare calculated luminosities with catalogue luminosities.
+    """
+
+    print("\n==============================")
+    print("Loading external catalogues...")
+    print("==============================")
+
+    cat466, idx466 = load_and_index_catalogue(f466_path)
+    cat470, idx470 = load_and_index_catalogue(f470_path)
+
+    print(f"F466N catalogue sources: {len(cat466)}")
+    print(f"F470N catalogue sources: {len(cat470)}")
+
+    # --- ID sets ---
+    ids_main = set(np.array(t["ID"], dtype=int))
+    ids_466  = set(idx466.keys())
+    ids_470  = set(idx470.keys())
+
+    print("\n==============================")
+    print("ID overlap check")
+    print("==============================")
+
+    print("Main table IDs:", len(ids_main))
+    print("F466N IDs:", len(ids_466))
+    print("F470N IDs:", len(ids_470))
+
+    print("\nMissing in F466N:", len(ids_main - ids_466))
+    print("Missing in F470N:", len(ids_main - ids_470))
+
+    print("Extra in F466N:", len(ids_466 - ids_main))
+    print("Extra in F470N:", len(ids_470 - ids_main))
+
+    # --- Compare luminosities ---
+    print("\n==============================")
+    print("Luminosity comparison")
+    print("==============================")
+
+    cols_compare = [
+        ("L_Ha_uncorr", "L_halpha_uncorr"),
+        ("L_Ha_apcorr", "L_halpha_uncorr"),   # aperture-only test
+        ("L_Ha_ap_dustcorr_cont", "L_halpha_corr_v1"),
+        ("L_Ha_ap_dustcorr_line", "L_halpha_corr_v2"),
+    ]
+
+    for i in range(len(t)):
+        obj_id = int(t["ID"][i])
+        src = str(t["SOURCE_CAT"][i])
+
+        # Choose correct external catalogue
+        if src == "F466N":
+            cat = cat466
+            idx = idx466
+        elif src == "F470N":
+            cat = cat470
+            idx = idx470
+        else:
+            continue
+
+        if obj_id not in idx:
+            continue
+
+        j = idx[obj_id]
+
+        print(f"\n--- ID {obj_id} ({src}) ---")
+
+        for mycol, catcol in cols_compare:
+            if mycol not in t.colnames or catcol not in cat.colnames:
+                continue
+
+            myval = t[mycol][i]
+            catval = cat[catcol][j]
+
+            if np.isfinite(myval) and np.isfinite(catval):
+                ratio = myval / catval
+                diff = myval - catval
+
+                print(f"{mycol} vs {catcol}")
+                print(f"   mine = {myval:.3e}")
+                print(f"   cat  = {catval:.3e}")
+                print(f"   ratio = {ratio:.3f}")
+                print(f"   diff  = {diff:.3e}")
+
+
 # ----------------------------
 # Main workflow
 # ----------------------------
@@ -325,6 +430,16 @@ def main():
             str(f_src[i]),
             str(ap_src[i]),
         ))
+    
+    # ============================
+    # Compare with external catalogues
+    # ============================
+    compare_with_external_catalogues(
+        t,
+        f466_cat_fits,
+        f470_cat_fits
+    )
+
 
 if __name__ == "__main__":
     main()
