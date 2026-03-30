@@ -13,6 +13,7 @@ from astropy.table import Table, join, vstack
 from scipy.stats import spearmanr, kendalltau
 
 
+
 # -------------------------------------------------
 # Helpers
 # -------------------------------------------------
@@ -297,6 +298,8 @@ def compute_correlations(x, y_det, y_ul, det_mask, ul_mask):
     else:
         tau, p_tau = np.nan, np.nan
 
+    print(f"[INFO] Spearman ρ = {rho:.2f} (p={p_rho:.2g}), Kendall τ = {tau:.2f} (p={p_tau:.2g})")
+
     return rho, p_rho, tau, p_tau
 
 
@@ -316,6 +319,9 @@ def plot_fesc_vs_property(
     sphinx_tab=None,
     sphinx_x_col=None,
     sphinx_y_col=None,
+    color_by=None,     
+    color_label=None,       
+
 ):
     """
     Plot f_esc versus a property, with optional SPHINX overlay and upper limits.
@@ -357,19 +363,21 @@ def plot_fesc_vs_property(
             sm = np.isfinite(sx) & np.isfinite(sy)
             ax.scatter(sx[sm], sy[sm], c="0.8", s=25, alpha=0.4, zorder=0)
 
-    has_mstar = np.any(np.isfinite(mstar[det_mask]))
+    has_mstar = np.any(np.isfinite(mstar[det_mask])) # the dault is coloring by M_star if available
+    cvals = color_by if color_by is not None else (mstar if has_mstar else None)
     if np.any(det_mask):
-        if has_mstar:
+        if cvals is not None and np.any(np.isfinite(cvals[det_mask])):
             sc = ax.scatter(
                 x[det_mask],
                 y[det_mask],
-                c=mstar[det_mask],
+                c=cvals[det_mask],
                 cmap="viridis",
                 s=40,
                 edgecolor="none",
                 zorder=2,
             )
-            fig.colorbar(sc, ax=ax, label=r"$M_\star\,[M_\odot]$")
+            if color_label:
+                fig.colorbar(sc, ax=ax, label=color_label)
         else:
             ax.scatter(
                 x[det_mask],
@@ -706,6 +714,36 @@ def main():
     if "E_BV_50" not in prop_plot_tab.colnames and "Av_50" in prop_plot_tab.colnames:
         Rv = 4.05  # Calzetti
         prop_plot_tab["E_BV_50"] = as_float(prop_plot_tab, "Av_50") / Rv
+
+    # -------------------------------------------------
+    # Load EW_rest from external CSV and match by ID
+    # -------------------------------------------------
+    ew_csv_path = "/cephfs/apatrick/musecosmos/scripts/sample_select/outputs/lya_ew_results_final.csv"
+    ew_tab = Table.read(ew_csv_path, format="ascii.csv")
+    ew_tab["ID"] = ew_tab["ID"].astype(int)
+
+    ew_ids = np.asarray(ew_tab["ID"], dtype=int)
+    sort_idx = np.argsort(ew_ids)
+    ew_ids_sorted = ew_ids[sort_idx]
+
+    tab_ids = np.asarray(tab["ID"], dtype=int)
+    pos = np.searchsorted(ew_ids_sorted, tab_ids)
+    match = (pos < len(ew_ids_sorted)) & (ew_ids_sorted[pos] == tab_ids)
+
+    # Detections
+    ew_det = np.full(len(tab), np.nan, dtype=float)
+    if "EW_rest_method2" in ew_tab.colnames:
+        ew_vals = as_float(ew_tab, "EW_rest_method2")[sort_idx]
+        ew_det[match] = ew_vals[pos[match]]
+
+    # Upper limits
+    ew_ul = np.full(len(tab), np.nan, dtype=float)
+    if "EW_rest_method2_upper_limit" in ew_tab.colnames:
+        ew_ul_vals = as_float(ew_tab, "EW_rest_method2_upper_limit")[sort_idx]
+        ew_ul[match] = ew_ul_vals[pos[match]]
+
+    prop_plot_tab["EW_rest_method2"] = ew_det
+    prop_plot_tab["EW_rest_method2_ul"] = ew_ul
        
 
     # 1) E(B-V)
@@ -723,12 +761,18 @@ def main():
             sphinx_tab=sphinx_tab,
             sphinx_x_col="E_BV_median" if sphinx_tab is not None and "E_BV_median" in sphinx_tab.colnames else None,
             sphinx_y_col="fesc_lya" if sphinx_tab is not None and "fesc_lya" in sphinx_tab.colnames else None,
-            ylim=(1e-3, 1.05), 
-            xlim=(0, 0.2),
+            ylim=None, # (1e-3, 1.05)
+            xlim=None, #(0, 0.2)
+            color_by=prop_plot_tab["beta"],
+            color_label=r"$\beta$",
         )
 
     # 2) A_V
     if "Av_50" in prop_plot_tab.colnames:
+        print("\n Fesc detections:")
+        print(np.array(prop_plot_tab["fesc_lya_dustcorr"]))   
+        print("\n Fesc upper limits:")
+        print(np.array(prop_plot_tab["fesc_lya_dustcorr_ul"]))
         plot_fesc_vs_property(
             prop_plot_tab,
             y_col="fesc_lya_dustcorr",
@@ -739,6 +783,8 @@ def main():
             out_path=os.path.join(args.out_dir, f"fesc_vs_Av_{args.aperture_tag}.png"),
             logy=True,
             ids=ids,
+            color_by=prop_plot_tab["beta"],
+            color_label=r"$\beta$",
         )
 
     # 3) UV beta slope
@@ -753,6 +799,8 @@ def main():
             out_path=os.path.join(args.out_dir, f"fesc_vs_beta_{args.aperture_tag}.png"),
             logy=True,
             ids=ids,
+            color_by=prop_plot_tab["M_star_50"],
+            color_label=r"$M_\star$",
         )
 
     # 4) M_UV (uncorrected)
@@ -767,6 +815,8 @@ def main():
             out_path=os.path.join(args.out_dir, f"fesc_vs_Muv_{args.aperture_tag}.png"),
             logy=True,
             ids=ids,
+            color_by=prop_plot_tab["beta"],
+            color_label=r"$\beta$",
         )
 
     # 5) sSFR (specific star formation rate)
@@ -781,6 +831,8 @@ def main():
             out_path=os.path.join(args.out_dir, f"fesc_vs_sSFR_{args.aperture_tag}.png"),
             logy=True,
             ids=ids,
+            color_by=prop_plot_tab["beta"],
+            color_label=r"$\beta$",
         )
     
     # 6) sSFR (specific star formation rate)
@@ -795,6 +847,8 @@ def main():
             out_path=os.path.join(args.out_dir, f"fesc_vs_sSFR_100Myr_{args.aperture_tag}.png"),
             logy=True,
             ids=ids,
+            color_by=prop_plot_tab["beta"],
+            color_label=r"$\beta$",
         )
 
 
@@ -810,6 +864,42 @@ def main():
             out_path=os.path.join(args.out_dir, f"fesc_vs_Z_{args.aperture_tag}.png"),
             logy=True,
             ids=ids,
+            color_by=prop_plot_tab["beta"],
+            color_label=r"$\beta$",
+        )
+
+    # 8) Stellar mass (M_star_50)
+    if "M_star_50" in prop_plot_tab.colnames:
+        plot_fesc_vs_property(
+            prop_plot_tab,
+            y_col="fesc_lya_dustcorr",
+            y_err_col="fesc_lya_dustcorr_err",
+            y_ul_col="fesc_lya_dustcorr_ul",
+            x_col="M_star_50",
+            xlabel=r"$M_\star$",
+            out_path=os.path.join(args.out_dir, f"fesc_vs_Mstar_{args.aperture_tag}.png"),
+            logy=True,
+            ids=ids,
+            color_by=prop_plot_tab["beta"],
+            color_label=r"$\beta$",
+        )
+    
+    # 9) Lyα Rest-frame EW 
+    if "EW_rest_method2" in prop_plot_tab.colnames:
+        plot_fesc_vs_property(
+            prop_plot_tab,
+            y_col="fesc_lya_dustcorr",
+            y_err_col="fesc_lya_dustcorr_err",
+            y_ul_col="fesc_lya_dustcorr_ul",
+            x_col="EW_rest_method2",
+            xlabel=r"$\mathrm{EW}_{\rm rest}$ (Å)",
+            out_path=os.path.join(args.out_dir, f"fesc_vs_EWrest_{args.aperture_tag}.png"),
+            logy=True,
+            logx=False,
+            ids=ids,
+            color_by=prop_plot_tab["beta"],
+            color_label=r"$\beta$",
+            xlim=(0, 250),   # hides the extreme outlier
         )
 
 
@@ -818,8 +908,9 @@ if __name__ == "__main__":
 
 
 """
-python lya_ha_fesc_analysis.py   --lya-csv /cephfs/apatrick/musecosmos/scripts/sample_select/outputs/lya_flux_ap0p6.csv   --ha-fits  /home/apatrick/P1/JELSDP/F466N_with_LHa_Corey_method.fits   --out-dir /cephfs/apatrick/musecosmos/scripts/sample_select/   --flux-mode flux_fit   --aperture-tag 0p6   --sphinx-table 
-/home/apatrick/P1/JELSDP/sphinx_lya_ha_fesc_table.fits --prop-fits /home/apatrick/P1/JELSDP/JELS_F466N_Halpha_cat_v1p0.fits /home/apatrick/P1/JELSDP/JELS_F470N_Halpha_cat_v1p0.fits 
+
+python lya_ha_fesc_analysis.py   --lya-csv /cephfs/apatrick/musecosmos/scripts/sample_select/outputs/lya_flux_ap0p6.csv   --ha-fits  /home/apatrick/P1/JELSDP/F466N_with_LHa_Corey_method.fits /home/apatrick/P1/JELSDP/F470N_with_LHa_Corey_method.fits   --out-dir /cephfs/apatrick/musecosmos/scripts/sample_select/   --flux-mode flux_fit   --aperture-tag 0p6   --sphinx-table /home/apatrick/P1/JELSDP/sphinx_lya_ha_fesc_table.fits --prop-fits /home/apatrick/P1/JELSDP/JELS_F466N_Halpha_cat_v1p0.fits /home/apatrick/P1/JELSDP/JELS_F470N_Halpha_cat_v1p0.fits 
+
 
 
 """

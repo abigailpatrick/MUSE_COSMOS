@@ -476,7 +476,7 @@ def main():
         ax.plot(z466, t466, color="#8B0000", linewidth=1.2)
         ax.fill_between(z470, t470, color="#9ecae1", alpha=0.35, label="F470N transmission")
         ax.plot(z470, t470, color="#003366", linewidth=1.2)
-        ax.set_ylabel("Normalized counts (area=1 overall) / transmission")
+        ax.set_ylabel("Transmission (normalized)")
         hist_max = max_hist_height(
             [
                 z[mask_f466 & detections],
@@ -503,8 +503,8 @@ def main():
         ax.set_ylabel("Counts")
         ax2.set_ylabel("Transmission (normalized)")
 
-    ax.set_xlabel(f"Halpha redshift (from wavelength)")
-    ax.set_title("Halpha redshift distribution with NIRCam filter transmission")
+    ax.set_xlabel(f"z(Hα)")
+   #ax.set_title("Halpha redshift distribution with NIRCam filter transmission")
 
     handles, labels = ax.get_legend_handles_labels()
     if not normalize_hist:
@@ -543,8 +543,10 @@ def main():
     fig.tight_layout()
     if args.out:
         fig.savefig(args.out)
+        print(f"Saved figure to {args.out}")
     else:
         plt.show()
+    
 
 
 if __name__ == "__main__":

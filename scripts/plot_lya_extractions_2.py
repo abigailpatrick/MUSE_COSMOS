@@ -363,7 +363,7 @@ if __name__ == "__main__":
     main()
 
 """
-python plot_lya_extractions.py \
+python plot_lya_extractions_2.py \
   --lya-csv /cephfs/apatrick/musecosmos/scripts/sample_select/outputs/lya_flux_ap0p6.csv \
   --extractions-dir /cephfs/apatrick/musecosmos/scripts/sample_select/outputs/extractions \
   --out-dir /cephfs/apatrick/musecosmos/scripts/sample_select/plots \

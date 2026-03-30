@@ -19,6 +19,9 @@ from matplotlib.patches import Circle
 
 LYA_REST_A = 1215.67
 
+# IDs to combine into a single stacked figure
+IDS_final = [1988, 2144, 5887]
+
 
 # -------------------------------------------------
 # Utilities
@@ -184,7 +187,7 @@ def plot_panel(
     var = spec["var"]
     noise = np.sqrt(np.clip(var, 0.0, np.inf))
 
-    fig = plt.figure(figsize=(14.5, 6.4))
+    fig = plt.figure(figsize=(18, 4.4))
     ax = fig.add_subplot(1, 1, 1)
     ax.step(wave, flux, where="mid", color="black", lw=1.0, alpha=0.75, label="Flux")
     ax.fill_between(wave, -noise, noise, color="gray", alpha=0.3, step="mid", label=r"$\pm 1\sigma$")
@@ -210,7 +213,7 @@ def plot_panel(
         y_min = np.nanmin(flux)
         y_max = np.nanmax(flux)
     y_range = max(y_max - y_min, 1e-12)
-    ax.set_ylim(y_min - 0.1 * y_range, y_max + 1.2 * y_range)
+    ax.set_ylim(y_min - 0.1 * y_range, y_max + 0.8 * y_range)
 
     ax.set_ylabel(r"Flux [$10^{-20}$ erg s$^{-1}$ cm$^{-2}$ Å$^{-1}$]")
     ax.set_xlabel("Wavelength [Å]")
@@ -218,7 +221,7 @@ def plot_panel(
 
     # Inset cutouts inside spectrum axis (top-right)
     inset_w = 0.145
-    inset_h = 0.26
+    inset_h = 0.22
     inset_pad = 0.002
     y0 = 0.70
     x0 = 1.0 - (3 * inset_w + 2 * inset_pad) - 0.001
@@ -263,10 +266,124 @@ def plot_panel(
     ax3.set_xticks([])
     ax3.set_yticks([])
 
-    ax.set_title(cutout_title, fontsize=11)
+    # ax.set_title(cutout_title, fontsize=11)
     fig.subplots_adjust(left=0.07, right=0.985, top=0.92, bottom=0.12)
     fig.savefig(outpath, dpi=300)
     plt.close(fig)
+    print(outpath)
+
+def plot_three_combined(df, args):
+
+    """
+    Make a 3-row stacked plot using the same plotting pipeline.
+    """
+
+    rows = df[df["ID"].isin(IDS_final)]
+
+    if len(rows) != 3:
+        print("[WARNING] IDS_final must contain exactly 3 valid IDs")
+        return
+
+    fig, axes = plt.subplots(3, 1, figsize=(18, 13))
+
+    for ax, (_, row) in zip(axes, rows.iterrows()):
+
+        row_index = row["row_index"]
+
+        spec, meta = load_extraction(args.extractions_dir, row_index, args.aperture_key)
+
+        if spec is None:
+            continue
+
+        lya_center = row.get("lya_center", meta.get("lya_center"))
+        ra = row.get("ra_used", meta.get("ra_used"))
+        dec = row.get("dec_used", meta.get("dec_used"))
+        band = row.get("band", None)
+
+        # --------------------
+        # pseudo NB
+        # --------------------
+
+        nb_img = None
+        cube_path = meta.get("cube_path")
+
+        if cube_path and os.path.exists(cube_path):
+
+            nb_img = extract_pseudonb(
+                cube_path=cube_path,
+                xpix=float(meta.get("xpix")),
+                ypix=float(meta.get("ypix")),
+                pixscale=float(meta.get("pixscale")),
+                wave=spec["wave"],
+                center=float(meta.get("lya_center")),
+                half_width=float(meta.get("integration_half_width")),
+                size_arcsec=args.nb_cutout_arcsec,
+            )
+
+        # --------------------
+        # JELS
+        # --------------------
+
+        jels_size_pix = int(args.nb_cutout_arcsec / args.jels_pixscale)
+
+        jels_data, _ = jels_cutout(
+            args.jels_template,
+            ra=ra,
+            dec=dec,
+            band=band,
+            cutout_size=(jels_size_pix, jels_size_pix),
+            pixel_scale=args.jels_pixscale,
+        )
+
+        # --------------------
+        # RGB
+        # --------------------
+
+        rgb_size_pix = int(args.nb_cutout_arcsec / args.rgb_pixscale)
+
+        rgb_img = rgb_cutout(
+            primer_path=args.rgb_fits,
+            ra=ra,
+            dec=dec,
+            cutout_size=(rgb_size_pix, rgb_size_pix),
+        )
+
+        meta["cutout_arcsec"] = float(args.nb_cutout_arcsec)
+
+        title = f"ID={row.get('ID', row_index)} | band={band}"
+
+        
+        fig_tmp = plt.figure()
+        ax_tmp = fig_tmp.add_subplot(111)
+
+        plot_panel(
+            outpath="/tmp/tmp.png",
+            spec=spec,
+            meta=meta,
+            lya_center=lya_center,
+            band=band,
+            jels_data=jels_data,
+            nb_img=nb_img,
+            rgb_img=rgb_img,
+            plot_window_ang=args.plot_window_ang,
+            cutout_title=title,
+            aperture_arcsec=float(row.get("aperture_arcsec", 0.6)),
+        )
+
+        plt.close(fig_tmp)
+
+        # reload the generated panel and display it in stacked figure
+        img = plt.imread("/tmp/tmp.png")
+
+        ax.imshow(img)
+        ax.axis("off")
+
+    outpath = os.path.join(args.out_dir, "combined_three_spectra.png")
+
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300)
+    plt.close(fig)
+
     print(outpath)
 
 
@@ -362,6 +479,11 @@ def main():
             cutout_title=title,
             aperture_arcsec=float(row.get("aperture_arcsec", 0.6)),
         )
+    
+    # -----------------------------------------
+    # Create combined stacked plot
+    # -----------------------------------------
+    plot_three_combined(df, args)
 
 
 if __name__ == "__main__":
