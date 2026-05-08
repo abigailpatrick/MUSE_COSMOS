@@ -1,18 +1,108 @@
 #!/usr/bin/env python3
 """
-Plot z_used histograms with JWST/NIRCam filter transmission curves.
+plot_filter_hist.py
+
+Plot z(Halpha) histograms with JWST/NIRCam filter transmission curves.
+Publication-ready for MNRAS single column (84 mm = 3.307 in).
 """
 
 import argparse
 
 import numpy as np
 import pandas as pd
+import matplotlib as mpl
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import matplotlib.colors as mcolors
+import cmasher as cmr
 
 try:
     from astropy.table import Table
 except Exception:
     Table = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLICATION TYPOGRAPHY
+# Match MNRAS body text (9 pt Times). Figures scale to column width so
+# use 5.5 pt for labels and 4.0 pt for tick labels.
+# ══════════════════════════════════════════════════════════════════════════════
+
+mpl.rcParams.update({
+    "font.family":            "serif",
+    "font.serif":             ["Times New Roman", "Times", "DejaVu Serif"],
+    "mathtext.fontset":       "dejavuserif",
+    "font.size":              5.5,
+    "axes.labelsize":         6.5,
+    "axes.titlesize":         5.5,
+    "xtick.labelsize":        5.0,
+    "ytick.labelsize":        5.0,
+    "legend.fontsize":        5.0,
+    "legend.title_fontsize":  5.5,
+    "lines.linewidth":        0.7,
+    "axes.linewidth":         0.4,
+    "xtick.major.width":      0.4,
+    "ytick.major.width":      0.4,
+    "xtick.minor.width":      0.3,
+    "ytick.minor.width":      0.3,
+    "xtick.major.size":       2.0,
+    "ytick.major.size":       2.0,
+    "xtick.minor.size":       1.0,
+    "ytick.minor.size":       1.0,
+    "xtick.direction":        "in",
+    "ytick.direction":        "in",
+    "xtick.top":              True,
+    "ytick.right":            True,
+    "xtick.minor.visible":    False,
+    "ytick.minor.visible":    False,
+    "legend.framealpha":      0.85,
+    "legend.edgecolor":       "0.6",
+    "legend.handlelength":    1.0,
+    "legend.handletextpad":   0.3,
+    "legend.borderpad":       0.3,
+    "legend.labelspacing":    0.2,
+})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIGURE DIMENSIONS — single column MNRAS
+# 84 mm = 3.307 in; height via 3:4 aspect ratio
+# ══════════════════════════════════════════════════════════════════════════════
+
+FIG_WIDTH  = 3.307          # inches  (84 mm — MNRAS single column)
+FIG_HEIGHT = FIG_WIDTH * 0.75
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THEME — change here to retheme the whole script
+# ══════════════════════════════════════════════════════════════════════════════
+
+THEME = "torch"
+
+
+def make_palette(name, n=8):
+    """
+    Build a colour palette from a cmasher colourmap.
+
+    Inputs
+        name : cmasher colourmap name (without 'cmr.' prefix).
+        n    : Number of colours to sample.
+
+    Output
+        Dict mapping 'c0'–'c{n-1}' and named extras to hex strings.
+    """
+    hexes = cmr.take_cmap_colors(
+        f"cmr.{name}", n, cmap_range=(0.10, 0.90), return_fmt="hex"
+    )
+    palette = {f"c{i}": h for i, h in enumerate(hexes)}
+    palette["near_black"]   = mcolors.to_hex((0.10, 0.10, 0.12, 1.0))
+    palette["neutral_grey"] = "#aab4c8"
+    palette["white"]        = "#ffffff"
+    palette["mid_grey"]     = "#888888"
+    return palette
+
+
+P = make_palette(THEME)
 
 
 def parse_int_list(value):
@@ -113,6 +203,7 @@ def load_transmission(path, wave_col, throughput_col, file_format):
                 wave = np.array(data[:, 0], dtype=float)
                 thr = np.array(data[:, 1], dtype=float)
                 return wave, thr
+
     colnames = list(tab.colnames)
     use_wave = wave_col
     use_thr = throughput_col
@@ -166,7 +257,6 @@ def wavelength_to_z_halpha(wave, unit, ha_wave):
     Output
         Numpy array of redshift.
     """
-
     wave_a = to_angstrom(wave, unit)
     return (wave_a / ha_wave) - 1.0
 
@@ -191,19 +281,44 @@ def split_by_filter(df, filter_col):
     return is_f466, is_f470
 
 
-def plot_hist(ax, values, bins, color, label, weights, linestyle, zorder):
+def normalize_to_peak(values, bins, weights=None):
     """
-    Plot an unfilled histogram on an axis.
+    Compute per-histogram peak-normalised weights so the histogram
+    reaches a maximum bar height of 1.
+
+    Inputs
+        values  : Numpy array of values to histogram.
+        bins    : Bin edges array.
+        weights : Optional existing weights array.
+
+    Output
+        Numpy array of rescaled weights (or None if values is empty).
+    """
+    if values.size == 0:
+        return None
+    counts, _ = np.histogram(values, bins=bins, weights=weights)
+    peak = np.nanmax(counts)
+    if peak <= 0 or not np.isfinite(peak):
+        return None
+    base_w = weights if weights is not None else np.ones_like(values, dtype=float)
+    return base_w / peak
+
+
+def plot_hist(ax, values, bins, color, label, weights, linestyle, linewidth, zorder, alpha=1.0):
+    """
+    Plot a step (outline-only) histogram on an axis.
 
     Inputs
         ax        : Matplotlib Axes.
         values    : Numpy array of values.
-        bins      : Number of bins.
-        color     : Histogram color.
+        bins      : Bin edges array.
+        color     : Histogram colour.
         label     : Legend label.
         weights   : Optional weights array.
-        linestyle : Matplotlib line style.
+        linestyle : Matplotlib line style string.
+        linewidth : Line width float.
         zorder    : Matplotlib zorder.
+        alpha     : Line alpha.
 
     Output
         None.
@@ -215,11 +330,61 @@ def plot_hist(ax, values, bins, color, label, weights, linestyle, zorder):
         bins=bins,
         weights=weights,
         histtype="step",
-        linewidth=1.8,
+        linewidth=linewidth,
         color=color,
         linestyle=linestyle,
         zorder=zorder,
         label=label,
+        alpha=alpha,
+    )
+
+
+def plot_hist_filled(ax, values, bins, color, label, weights, zorder, fill_alpha=0.30, edge_alpha=0.70):
+    """
+    Plot a filled step histogram (stepfilled) for non-detections.
+
+    The fill gives spatial extent at a glance; the semi-transparent edge
+    keeps the outline readable without competing with detection outlines.
+
+    Inputs
+        ax          : Matplotlib Axes.
+        values      : Numpy array of values.
+        bins        : Bin edges array.
+        color       : Histogram colour.
+        label       : Legend label.
+        weights     : Optional weights array.
+        zorder      : Matplotlib zorder.
+        fill_alpha  : Alpha for the filled region.
+        edge_alpha  : Alpha for the step outline.
+
+    Output
+        None.
+    """
+    if values.size == 0:
+        return
+    # Filled region
+    ax.hist(
+        values,
+        bins=bins,
+        weights=weights,
+        histtype="stepfilled",
+        linewidth=0,
+        color=color,
+        zorder=zorder,
+        label=label,
+        alpha=fill_alpha,
+    )
+    # Outline on top of fill — dashed, semi-transparent
+    ax.hist(
+        values,
+        bins=bins,
+        weights=weights,
+        histtype="step",
+        linewidth=1.0,
+        color=color,
+        linestyle="-",
+        zorder=zorder + 1,
+        alpha=edge_alpha,
     )
 
 
@@ -239,45 +404,6 @@ def normalize_curve(values):
     return values / vmax
 
 
-def weights_for_total(values, total_count, scale):
-    """
-    Build global area-normalized weights.
-
-    Inputs
-        values      : Numpy array of values.
-        total_count : Total number of sources across filters.
-        scale       : Scale factor for histogram height.
-
-    Output
-        Numpy array of weights or None.
-    """
-    if total_count <= 0:
-        return None
-    return scale * np.ones_like(values, dtype=float) / float(total_count)
-
-
-def max_hist_height(values_list, bins, weights_list):
-    """
-    Compute max histogram height across multiple samples.
-
-    Inputs
-        values_list  : List of numpy arrays.
-        bins         : Bin edges or bin count.
-        weights_list : List of weight arrays or None.
-
-    Output
-        Float max height.
-    """
-    max_val = 0.0
-    for values, weights in zip(values_list, weights_list):
-        if values.size == 0:
-            continue
-        counts, _ = np.histogram(values, bins=bins, weights=weights)
-        if counts.size:
-            max_val = max(max_val, float(np.nanmax(counts)))
-    return max_val
-
-
 def main():
     """
     Entry point.
@@ -293,10 +419,10 @@ def main():
     )
     parser.add_argument(
         "--csv",
-        default="/cephfs/apatrick/musecosmos/scripts/sample_select/outputs/lya_flux_ap0p6.csv",
+        default="/cephfs/apatrick/musecosmos/scripts/sample_select/outputs/final_merged.csv",
         help="Path to CSV file.",
     )
-    parser.add_argument("--z-col", default="z_used", help="Redshift column.")
+    parser.add_argument("--z-col", default="z_jels", help="Redshift column.")
     parser.add_argument(
         "--filter-col",
         default="band",
@@ -312,17 +438,11 @@ def main():
         default="1,2",
         help="Comma-separated values that count as detections.",
     )
-    parser.add_argument("--bins", type=int, default=25, help="Number of bins.")
+    parser.add_argument("--bins", type=int, default=15, help="Number of bins.")
     parser.add_argument(
         "--no-normalize",
         action="store_true",
-        help="Plot raw counts instead of normalizing to 1.",
-    )
-    parser.add_argument(
-        "--hist-scale",
-        type=float,
-        default=6.0,
-        help="Scale factor for normalized histograms (e.g., 1.5).",
+        help="Plot raw counts instead of normalizing each histogram to its own peak.",
     )
     parser.add_argument(
         "--f466n-file",
@@ -337,7 +457,7 @@ def main():
     parser.add_argument(
         "--wave-unit",
         default="angstrom",
-        help="Wavelength unit for transmission files ",
+        help="Wavelength unit for transmission files.",
     )
     parser.add_argument(
         "--ha-wave",
@@ -362,11 +482,14 @@ def main():
     )
     parser.add_argument(
         "--out",
-        default="/cephfs/apatrick/musecosmos/scripts/sample_select/filter_hist.png",
+        default="/cephfs/apatrick/musecosmos/scripts/sample_select/filter_hist.pdf",
         help="Optional output path to save figure (png/pdf).",
     )
     args = parser.parse_args()
 
+    # ------------------------------------------------------------------
+    # Load catalogue
+    # ------------------------------------------------------------------
     df = pd.read_csv(args.csv)
     z_col = args.z_col
 
@@ -389,6 +512,9 @@ def main():
     throughput_col = args.throughput_col.strip() or None
     trans_format = args.trans_format.strip() or None
 
+    # ------------------------------------------------------------------
+    # Load filter transmission curves
+    # ------------------------------------------------------------------
     w466, t466 = load_transmission(
         args.f466n_file, wave_col, throughput_col, trans_format
     )
@@ -402,151 +528,131 @@ def main():
     t466 = normalize_curve(t466)
     t470 = normalize_curve(t470)
 
-    fig, ax = plt.subplots(figsize=(8.5, 5.0), dpi=120)
+    # ------------------------------------------------------------------
+    # Build masks and bin edges
+    # ------------------------------------------------------------------
+    mask_f466_det  = is_f466 & z_valid & detections
+    mask_f466_non  = is_f466 & z_valid & ~detections
+    mask_f470_det  = is_f470 & z_valid & detections
+    mask_f470_non  = is_f470 & z_valid & ~detections
 
-    mask_f466 = is_f466 & z_valid
-    mask_f470 = is_f470 & z_valid
-    mask_det = detections & z_valid
-    mask_nondet = (~detections) & z_valid
-
-    n_f466_det = int(np.sum(mask_f466 & detections))
-    n_f470_det = int(np.sum(mask_f470 & detections))
-    n_f466_nondet = int(np.sum(mask_f466 & ~detections))
-    n_f470_nondet = int(np.sum(mask_f470 & ~detections))
-    n_f466_total = n_f466_det + n_f466_nondet
-    n_f470_total = n_f470_det + n_f470_nondet
-    n_total = n_f466_total + n_f470_total
+    n_f466_det    = int(np.sum(mask_f466_det))
+    n_f470_det    = int(np.sum(mask_f470_det))
+    n_f466_nondet = int(np.sum(mask_f466_non))
+    n_f470_nondet = int(np.sum(mask_f470_non))
 
     z_all = z[z_valid]
     bin_edges = np.histogram_bin_edges(z_all, bins=args.bins)
-    weights_466_det = None
-    weights_466_nondet = None
-    weights_470_det = None
-    weights_470_nondet = None
-    if normalize_hist:
-        scale = args.hist_scale
-        weights_466_det = weights_for_total(z[mask_f466 & detections], n_total, scale)
-        weights_466_nondet = weights_for_total(z[mask_f466 & ~detections], n_total, scale)
-        weights_470_det = weights_for_total(z[mask_f470 & detections], n_total, scale)
-        weights_470_nondet = weights_for_total(z[mask_f470 & ~detections], n_total, scale)
 
-    plot_hist(
-        ax,
-        z[mask_f466 & detections],
-        bin_edges,
-        color="#8B0000",
-        label=f"F466N detection (N={n_f466_det})",
-        weights=weights_466_det,
-        linestyle="-",
-        zorder=3,
-    )
-    plot_hist(
-        ax,
-        z[mask_f470 & detections],
-        bin_edges,
-        color="#003366",
-        label=f"F470N detection (N={n_f470_det})",
-        weights=weights_470_det,
-        linestyle="-",
-        zorder=3,
-    )
-    plot_hist(
-        ax,
-        z[mask_f466 & ~detections],
-        bin_edges,
-        color="#f4a3a3",
-        label=f"F466N non-detection (N={n_f466_nondet})",
-        weights=weights_466_nondet,
-        linestyle="--",
-        zorder=4,
-    )
-    plot_hist(
-        ax,
-        z[mask_f470 & ~detections],
-        bin_edges,
-        color="#9ecae1",
-        label=f"F470N non-detection (N={n_f470_nondet})",
-        weights=weights_470_nondet,
-        linestyle="--",
-        zorder=4,
-    )
+    # ------------------------------------------------------------------
+    # Colour palette — drawn from cmr.torch via shared make_palette()
+    #   torch c0–c7 runs dark-purple → rust → orange → amber → yellow
+    #
+    #   F466N → orange family  (c2 det, c1 non-det)
+    #   F470N → amber/gold     (c5 det, c4 non-det)
+    # ------------------------------------------------------------------
+    C466_DET = P["c2"]   # burnt orange  — F466N detections
+    C466_NON = P["c1"]   # deep rust     — F466N non-detections
+    C470_DET = P["c5"]   # golden yellow — F470N detections
+    C470_NON = P["c4"]   # amber         — F470N non-detections
+
+    # ------------------------------------------------------------------
+    # Compute per-histogram peak-normalised weights (optional)
+    # ------------------------------------------------------------------
+    if normalize_hist:
+        w466_det = normalize_to_peak(z[mask_f466_det], bin_edges)
+        w466_non = normalize_to_peak(z[mask_f466_non], bin_edges)
+        w470_det = normalize_to_peak(z[mask_f470_det], bin_edges)
+        w470_non = normalize_to_peak(z[mask_f470_non], bin_edges)
+    else:
+        w466_det = w466_non = w470_det = w470_non = None
+
+    # ------------------------------------------------------------------
+    # Figure — MNRAS single column
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, FIG_HEIGHT), dpi=600)
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    # Transmission curves scaled to 1.1 — drawn first, sit behind histograms
+    t466_scaled = t466 * 1.1
+    t470_scaled = t470 * 1.1
+    ax.fill_between(z466, t466_scaled, color=C466_DET, alpha=0.08, zorder=1)
+    ax.plot(z466, t466_scaled, color=C466_DET, linewidth=0.7, alpha=0.55,
+            zorder=1, label="F466N transmission")
+    ax.fill_between(z470, t470_scaled, color=C470_DET, alpha=0.08, zorder=1)
+    ax.plot(z470, t470_scaled, color=C470_DET, linewidth=0.7, alpha=0.55,
+            zorder=1, label="F470N transmission")
+
+    # Non-detections — filled (soft, background)
+    plot_hist_filled(ax, z[mask_f466_non], bin_edges,
+                     color=C466_NON,
+                     label=rf"F466N non-detection",
+                     weights=w466_non, zorder=2)
+
+    plot_hist_filled(ax, z[mask_f470_non], bin_edges,
+                     color=C470_NON,
+                     label=rf"F470N non-detection",
+                     weights=w470_non, zorder=2)
+
+    # Detections — thick solid outlines on top
+    plot_hist(ax, z[mask_f466_det], bin_edges,
+              color=C466_DET,
+              label=rf"F466N detection",
+              weights=w466_det, linestyle="-", linewidth=1.2, zorder=4)
+
+    plot_hist(ax, z[mask_f470_det], bin_edges,
+              color=C470_DET,
+              label=rf"F470N detection ",
+              weights=w470_det, linestyle="-", linewidth=1.2, zorder=4)
+
+    # ------------------------------------------------------------------
+    # Axis labels and ticks
+    # ------------------------------------------------------------------
+    ax.set_xlabel(r"$z(\mathrm{H\alpha})$", fontsize=6.5)
 
     if normalize_hist:
-        ax.fill_between(z466, t466, color="#f4a3a3", alpha=0.35, label="F466N transmission")
-        ax.plot(z466, t466, color="#8B0000", linewidth=1.2)
-        ax.fill_between(z470, t470, color="#9ecae1", alpha=0.35, label="F470N transmission")
-        ax.plot(z470, t470, color="#003366", linewidth=1.2)
-        ax.set_ylabel("Transmission (normalized)")
-        hist_max = max_hist_height(
-            [
-                z[mask_f466 & detections],
-                z[mask_f470 & detections],
-                z[mask_f466 & ~detections],
-                z[mask_f470 & ~detections],
-            ],
-            bins=bin_edges,
-            weights_list=[
-                weights_466_det,
-                weights_470_det,
-                weights_466_nondet,
-                weights_470_nondet,
-            ],
-        )
-        ylim_top = max(1.05, 1.05 * hist_max)
-        ax.set_ylim(0.0, ylim_top)
+        ax.set_ylabel("Normalised counts", fontsize=6.5)
+        ax.set_ylim(0.0, 1.25)
+        ax.yaxis.set_major_locator(ticker.MultipleLocator(0.2))
+        ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.1))
     else:
         ax2 = ax.twinx()
-        ax2.fill_between(z466, t466, color="#f4a3a3", alpha=0.35, label="F466N transmission")
-        ax2.plot(z466, t466, color="#8B0000", linewidth=1.2)
-        ax2.fill_between(z470, t470, color="#9ecae1", alpha=0.35, label="F470N transmission")
-        ax2.plot(z470, t470, color="#003366", linewidth=1.2)
-        ax.set_ylabel("Counts")
-        ax2.set_ylabel("Transmission (normalized)")
+        ax2.fill_between(z466, t466, color=C466_DET, alpha=0.10, zorder=1)
+        ax2.plot(z466, t466, color=C466_DET, linewidth=0.7, alpha=0.55, zorder=1)
+        ax2.fill_between(z470, t470, color=C470_DET, alpha=0.10, zorder=1)
+        ax2.plot(z470, t470, color=C470_DET, linewidth=0.7, alpha=0.55, zorder=1)
+        ax.set_ylabel("$N$", fontsize=5.5)
+        ax2.set_ylabel("Filter transmission", fontsize=5.5)
+        ax2.set_ylim(0.0, 1.15)
+        ax2.tick_params(labelsize=4.0)
 
-    ax.set_xlabel(f"z(Hα)")
-   #ax.set_title("Halpha redshift distribution with NIRCam filter transmission")
-
+    # ------------------------------------------------------------------
+    # Legend — F466N entries upper-left, F470N entries upper-right
+    # ------------------------------------------------------------------
     handles, labels = ax.get_legend_handles_labels()
-    if not normalize_hist:
-        h2, l2 = ax2.get_legend_handles_labels()
-        handles += h2
-        labels += l2
 
-    f466_handles = []
-    f466_labels = []
-    f470_handles = []
-    f470_labels = []
-    for handle, label in zip(handles, labels):
-        if "F466N" in label:
-            f466_handles.append(handle)
-            f466_labels.append(label)
-        if "F470N" in label:
-            f470_handles.append(handle)
-            f470_labels.append(label)
+    f466_h, f466_l, f470_h, f470_l = [], [], [], []
+    for h, l in zip(handles, labels):
+        if "F466N" in l:
+            f466_h.append(h); f466_l.append(l)
+        elif "F470N" in l:
+            f470_h.append(h); f470_l.append(l)
 
-    legend_f466 = ax.legend(
-        f466_handles,
-        f466_labels,
-        frameon=False,
-        fontsize=9,
-        loc="upper left",
-    )
-    ax.add_artist(legend_f466)
-    ax.legend(
-        f470_handles,
-        f470_labels,
-        frameon=False,
-        fontsize=9,
-        loc="upper right",
-    )
+    leg466 = ax.legend(f466_h, f466_l, frameon=False, fontsize=5.0, loc="upper left")
+    ax.add_artist(leg466)
+    ax.legend(f470_h, f470_l, frameon=False, fontsize=5.0, loc="upper right")
 
-    fig.tight_layout()
+    # ------------------------------------------------------------------
+    # Save
+    # ------------------------------------------------------------------
+    fig.tight_layout(pad=0.3)
+
     if args.out:
-        fig.savefig(args.out)
+        fig.savefig(args.out, bbox_inches="tight", facecolor="white", dpi=600)
         print(f"Saved figure to {args.out}")
     else:
         plt.show()
-    
 
 
 if __name__ == "__main__":
