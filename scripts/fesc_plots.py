@@ -6,7 +6,7 @@ Usage
 -----
   python fesc_plots.py \\
       --merged-csv /path/to/final_merged.csv \\
-      --out-dir    /path/to/outputs/ \\
+      --out-dir    /path/to/outputs/ \\issue 
       [--remove-agn] \\
       [--sphinx-table /path/to/sphinx.fits] \\
       [--caseb 8.7] \\
@@ -169,37 +169,176 @@ def get_ew_lya(df: pd.DataFrame) -> np.ndarray:
 # STATISTICS
 # ══════════════════════════════════════════════════════════════════════════════
 
+from lifelines import KaplanMeierFitter
+from scipy.stats import spearmanr, norm
+import numpy as np
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# KM-CORRECTED CENSORED CORRELATION  (Isobe, Feigelson & Nelson 1986)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def km_corrected_ranks(y, censored):
+    """
+    Use the Kaplan-Meier estimator to assign expected ranks to censored
+    and uncensored observations, following Isobe, Feigelson & Nelson (1986).
+
+    For upper limits in y (censored=True), the KM survival function gives
+    the probability that the true value exceeds each observed limit, which
+    is used to compute expected fractional ranks.
+
+    Parameters
+    ----------
+    y        : array-like  — observed y values (UL = the limit value)
+    censored : bool array  — True where y is an upper limit
+
+    Returns
+    -------
+    ranks : ndarray, shape (n,)  — KM-corrected expected ranks in [0, 1]
+    """
+    y        = np.asarray(y, dtype=float)
+    censored = np.asarray(censored, dtype=bool)
+    n        = len(y)
+
+    # lifelines KaplanMeierFitter treats upper limits as left-censored
+    # when we flip the sign: fit on -y, event_observed = ~censored
+    # (i.e. a detection in y is an "event" in survival terms)
+    kmf = KaplanMeierFitter()
+    kmf.fit(
+        durations       = -y,           # flip so ULs become left-censored
+        event_observed  = ~censored,    # detected = event occurred
+        label           = "KM"
+    )
+
+    # Evaluate survival function S(t) at each observed -y value
+    # S(-y_i) = P(true value > -y_i) = P(true y < y_i)
+    # So the expected rank of point i is  n * S(-y_i)
+    ranks = np.empty(n)
+    for i, yi in enumerate(y):
+        # S(-yi) from the KM curve
+        s = kmf.survival_function_at_times(-yi).values[0]
+        ranks[i] = n * s
+
+    return ranks
+
+
+def kendall_tau_km(x, y, censored):
+    """
+    Censored Kendall's τ using KM-corrected ranks for the censored variable y.
+
+    Procedure
+    ---------
+    1. Fit KM survival function on y (accounting for upper limits).
+    2. Replace each y_i with its KM-expected rank E[rank(y_i)].
+    3. Compute standard Spearman ρ on (x, km_rank(y)) as a proxy for τ.
+       Then compute Kendall τ directly on the KM ranks.
+
+    This follows the Schmitt (1985) / Isobe et al. (1986) approach and is
+    the same underlying machinery as the IRAF STSDAS `bhkmethod`.
+
+    Parameters
+    ----------
+    x        : array-like  — fully observed independent variable
+    y        : array-like  — dependent variable, may contain upper limits
+    censored : bool array  — True where y[i] is an upper limit
+
+    Returns
+    -------
+    tau : float   — Kendall's τ on KM-corrected ranks
+    p   : float   — two-sided p-value (normal approximation)
+    rho : float   — Spearman ρ on KM-corrected ranks (bonus diagnostic)
+    p_rho : float
+    """
+    x        = np.asarray(x,        dtype=float)
+    y        = np.asarray(y,        dtype=float)
+    censored = np.asarray(censored, dtype=bool)
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    x, y, censored = x[finite], y[finite], censored[finite]
+    n = len(x)
+
+    if n < 3:
+        return np.nan, np.nan, np.nan, np.nan
+
+    # ── Step 1: KM-corrected ranks for y ──────────────────────────────────
+    km_ranks = km_corrected_ranks(y, censored)
+
+    # ── Step 2: Kendall τ on (x, km_ranks) ────────────────────────────────
+    from scipy.stats import kendalltau as _kendalltau
+    tau, _ = _kendalltau(x, km_ranks)
+
+    # Normal approximation for p-value (valid n ≳ 10)
+    v0 = 2 * (2 * n + 5) / (9 * n * (n - 1))
+    z  = tau / np.sqrt(v0)
+    p  = 2 * norm.sf(abs(z))
+
+    # ── Bonus: Spearman on KM ranks ────────────────────────────────────────
+    rho, p_rho = spearmanr(x, km_ranks)
+
+    return tau, p, rho, p_rho
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN CORRELATION FUNCTION  (drop-in replacement)
+# ══════════════════════════════════════════════════════════════════════════════
+
 def compute_correlations(x, y_det, y_ul, det_mask, ul_mask):
     """
-    Spearman on measured values only; Kendall treating UL values as censored.
-    Returns (rho, p_rho, tau, p_tau).
+    Spearman ρ on detections only.
+    KM-corrected Kendall τ on full sample (detections + upper limits).
+
+    Parameters
+    ----------
+    x        : ndarray  — full array of x values (e.g. log fesc or xi_ion)
+    y_det    : ndarray  — y values at detection positions (NaN elsewhere)
+    y_ul     : ndarray  — y values at UL positions (NaN elsewhere)
+    det_mask : bool arr — True where source is a detection
+    ul_mask  : bool arr — True where source is an upper limit
     """
-    # Spearman — detections only
-    xs = x[det_mask];  ys = y_det[det_mask]
-    m  = np.isfinite(xs) & np.isfinite(ys)
-    rho, p_rho = spearmanr(xs[m], ys[m]) if m.sum() > 2 else (np.nan, np.nan)
 
-    # Kendall — detections + upper-limit values
-    xk = np.concatenate([x[det_mask], x[ul_mask]])
-    yk = np.concatenate([y_det[det_mask], y_ul[ul_mask]])
-    m  = np.isfinite(xk) & np.isfinite(yk)
-    tau, p_tau = kendalltau(xk[m], yk[m]) if m.sum() > 2 else (np.nan, np.nan)
+    # ── Spearman — detections only ─────────────────────────────────────────
+    xs, ys = x[det_mask], y_det[det_mask]
+    m      = np.isfinite(xs) & np.isfinite(ys)
+    rho_det, p_rho_det = (
+        spearmanr(xs[m], ys[m]) if m.sum() > 2 else (np.nan, np.nan)
+    )
 
-    print(f"    Spearman ρ={rho:.3f} (p={p_rho:.2g})  "
-          f"Kendall τ={tau:.3f} (p={p_tau:.2g})")
-    return rho, p_rho, tau, p_tau
+    # ── KM-corrected Kendall τ — full sample ──────────────────────────────
+    all_mask     = det_mask | ul_mask
+    x_all        = x[all_mask]
+    y_all        = np.where(det_mask[all_mask], y_det[all_mask], y_ul[all_mask])
+    censored_all = ul_mask[all_mask]
 
+    tau, p_tau, rho_km, p_rho_km = kendall_tau_km(x_all, y_all, censored_all)
+
+    n_det = det_mask.sum()
+    n_ul  = ul_mask.sum()
+    print(
+        f"  Spearman (dets only):       ρ = {rho_det:.3f}  (p = {p_rho_det:.3g},  N = {m.sum()})\n"
+        f"  KM-corrected Kendall τ:     τ = {tau:.3f}      (p = {p_tau:.3g},  "
+        f"N_det = {n_det},  N_UL = {n_ul})\n"
+        f"  KM-corrected Spearman ρ:    ρ = {rho_km:.3f}   (p = {p_rho_km:.3g})"
+    )
+
+    return rho_det, p_rho_det, tau, p_tau, rho_km, p_rho_km
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER: paper-ready text
+# ══════════════════════════════════════════════════════════════════════════════
 
 def corr_text(rho, p_rho, tau, p_tau) -> str:
     def fp(p):
-        if np.isnan(p):  return "–"
+        if np.isnan(p):  return r"\text{--}"
         if p < 0.001:    return "<0.001"
         return f"{p:.3f}"
-    r = "–" if np.isnan(rho) else f"{rho:.2f}"
-    t = "–" if np.isnan(tau) else f"{tau:.2f}"
-    return (rf"$\rho={r}$  ($p={fp(p_rho)}$)"
-            "\n"
-            rf"$\tau={t}$  ($p={fp(p_tau)}$)")
+    r = r"\text{--}" if np.isnan(rho) else f"{rho:.2f}"
+    t = r"\text{--}" if np.isnan(tau) else f"{tau:.2f}"
+    return (
+        rf"$\rho={r}$  ($p={fp(p_rho)}$)"
+        "\n"
+        rf"$\tau_\mathrm{{KM}}={t}$  ($p={fp(p_tau)}$)"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -309,40 +448,35 @@ def add_legend(ax, show_agn, loc="upper right"):
         )
     ax.legend(handles=handles, loc=loc, fontsize=7, handletextpad=0.3)
 
-
 def draw_clipped_points(ax, x, y, mask,
                         xlim=None, ylim=None,
-                        marker="<",
                         color="k",
-                        size=40,
+                        size=45,
                         alpha=0.9,
                         zorder=6):
     """
-    Draw markers on plot boundaries for points outside axis limits.
+    Draw directional arrow markers on axis edges for points outside xlim.
 
-    Currently handles x-values below xmin.
+    Left-clipped  (x < xmin) → '<' marker pinned to xmin.
+    Right-clipped (x > xmax) → '>' marker pinned to xmax.
+    y values are preserved in both cases.
     """
-
     if xlim is None:
         return
 
     xmin, xmax = xlim
 
-    # Points left of plot
-    m_left = mask & np.isfinite(x) & np.isfinite(y) & (x < xmin)
+    base_kw = dict(s=size, facecolor=color, edgecolor=color,
+                   alpha=alpha, clip_on=False, zorder=zorder)
+
+    m_left  = mask & np.isfinite(x) & np.isfinite(y) & (x < xmin)
+    m_right = mask & np.isfinite(x) & np.isfinite(y) & (x > xmax)
 
     if np.any(m_left):
-        ax.scatter(
-            np.full(np.sum(m_left), xmin),
-            y[m_left],
-            marker=marker,
-            s=size,
-            facecolor=color,
-            edgecolor=color,
-            alpha=alpha,
-            clip_on=False,
-            zorder=zorder,
-        )
+        ax.scatter(np.full(m_left.sum(), xmin),  y[m_left],  marker="<", **base_kw)
+
+    if np.any(m_right):
+        ax.scatter(np.full(m_right.sum(), xmax), y[m_right], marker=">", **base_kw)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -380,8 +514,8 @@ def plot_lya_vs_ha(df, is_strong, is_weak, is_ul, is_agn,
     xx = np.logspace(38, 45, 300)
 
     for ax, ha_L, ha_L_err, title, xlim in [
-        (ax_left,  ha_uncorr, ha_uncorr_err, r"$L(\mathrm{H\alpha})_\mathrm{uncorr}\  [\mathrm{{erg\,s^{{-1}}}}]$",(1e41, 8e43),),
-        (ax_right, ha_corr,   ha_corr_err,   r"$L(\mathrm{H\alpha})_\mathrm{corr}\  [\mathrm{{erg\,s^{{-1}}}}]$",(1e41, 8e43),),
+        (ax_left,  ha_uncorr, ha_uncorr_err, r"$L(\mathrm{H\alpha})_\mathrm{uncorr}\  [\mathrm{{erg\,s^{{-1}}}}]$",(1e41, 8e44),),
+        (ax_right, ha_corr,   ha_corr_err,   r"$L(\mathrm{H\alpha})_\mathrm{corr}\  [\mathrm{{erg\,s^{{-1}}}}]$",(1e41, 8e44),),
     ]:
         # SPHINX background (only on corrected panel if provided)
         if ax is ax_right and sphinx_x is not None and sphinx_y is not None:
@@ -403,12 +537,14 @@ def plot_lya_vs_ha(df, is_strong, is_weak, is_ul, is_agn,
                 sim_lya     = pd.to_numeric(sim["Llya_erg_s"], errors="coerce").to_numpy()
                 sim_lya_ep  = pd.to_numeric(sim["Llya_err_plus"], errors="coerce").to_numpy()
                 sim_lya_em  = pd.to_numeric(sim["Llya_err_minus"], errors="coerce").to_numpy()
+                sim_z = pd.to_numeric(sim["z_sys"], errors="coerce").to_numpy()
 
                 m_sim = (
                     np.isfinite(sim_ha) &
                     np.isfinite(sim_lya) &
                     (sim_ha > 0) &
-                    (sim_lya > 0)
+                    (sim_lya > 0) &
+                    (sim_z > 6.0)
                 )
 
                 if np.any(m_sim):
@@ -555,7 +691,8 @@ def plot_fesc_vs_property(df, is_strong, is_weak, is_ul, is_agn,
     ul_mask  = is_ul & x_ok & np.isfinite(y_ul) & (y_ul > 0)
 
     print(f"\n  {x_col}: {det_mask.sum()} det, {ul_mask.sum()} UL")
-    rho, p_rho, tau, p_tau = compute_correlations(x, y, y_ul, det_mask, ul_mask)
+    rho, p_rho, tau, p_tau, _, _ = compute_correlations(x, y, y_ul, det_mask, ul_mask)
+
 
     fig, ax = plt.subplots(figsize=(5.0, 5.0))
 
@@ -612,7 +749,7 @@ def plot_fesc_vs_property(df, is_strong, is_weak, is_ul, is_agn,
 PANEL_PROPS = [
     # ── row 0 (AGN shown if show_agn=True) ──────────────────────────────────
     ("m_uv_ab_uncorr",  "m_uv_ab_err_uncorr", r"$M_\mathrm{UV}$ (AB, uncorr)", False, None,       True),
-    ("beta",            "beta_err",            r"$\beta_\mathrm{UV}$",          False, (-4, 0),       True),
+    ("beta",            "beta_err",            r"$\beta_\mathrm{UV}$",          False, (-3.8, -0.5),       True),
     ("ew_lya",          None,                  r"$\mathrm{EW}_\mathrm{Ly\alpha,rest}\ [\AA]$", False, (0, 150), True),
     # ── row 1 (AGN never shown) ──────────────────────────────────────────────
     ("E_BV",            None,                  r"$E(B{-}V)$",                   False, None,       False),
@@ -681,7 +818,7 @@ def plot_fesc_panel(df, is_strong, is_weak, is_ul, is_agn,
         ul_mask  = is_ul & x_ok & np.isfinite(y_ul) & (y_ul > 0)
 
         print(f"  [{x_col}] {det_mask.sum()} det, {ul_mask.sum()} UL")
-        rho, p_rho, tau, p_tau = compute_correlations(x, y, y_ul, det_mask, ul_mask)
+        rho, p_rho, tau, p_tau, _, _ = compute_correlations(x, y, y_ul, det_mask, ul_mask)
 
         # SPHINX overlay (E_BV panel only)
         if sphinx_tab is not None and x_col == "E_BV":
@@ -711,57 +848,45 @@ def plot_fesc_panel(df, is_strong, is_weak, is_ul, is_agn,
         if logx:
             ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.set_xlabel(xlabel, fontsize=10)
+        ax.set_xlabel(xlabel, fontsize=11)
         if xlim:
             ax.set_xlim(*xlim)
         
         # Mark sources clipped by x-axis limits
         if xlim is not None:
 
-            clipped_mask = (
-                (is_strong | is_weak | is_agn) &
-                np.isfinite(x) &
-                np.isfinite(y)
-            )
-
+            # detections clipped by x limits
             draw_clipped_points(ax, x, y,
-                clipped_mask,
+                (is_strong | is_weak | is_agn) & np.isfinite(x) & np.isfinite(y),
                 xlim=xlim,
                 color=C_DET if x_col != "beta" else P["c3"],
-                marker="<",
                 size=45,
             )
 
-                # upper limits
-            clipped_ul = (
-                is_ul &
-                np.isfinite(x) &
-                np.isfinite(y_ul)
-            )
-
-            draw_clipped_points(
-                ax,
-                x,
-                y_ul,
-                clipped_ul,
+            # upper limits clipped by x limits
+            draw_clipped_points(ax, x, y_ul,
+                is_ul & np.isfinite(x) & np.isfinite(y_ul),
                 xlim=xlim,
                 color=C_UL,
-                marker="<",
                 size=45,
             )
+     
 
 
         if cidx == 0:
-            ax.set_ylabel(r"$f^\mathrm{Ly\alpha}_\mathrm{esc}$", fontsize=10)
+            ax.set_ylabel(r"$f^\mathrm{Ly\alpha}_\mathrm{esc}$", fontsize=12)
 
         # Correlation text
-        ax.text(0.05, 0.05, corr_text(rho, p_rho, tau, p_tau),
-                transform=ax.transAxes, fontsize=7, va="bottom",
+        ax.text(0.50, 0.03, corr_text(rho, p_rho, tau, p_tau),
+                transform=ax.transAxes, fontsize=8.5, va="bottom",
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="none", alpha=0.8))
 
         # Legend in leftmost panel of each row only
         if cidx == 0:
-            add_legend(ax, show_agn=show_agn and agn_in_row, loc="upper right")
+            leg = add_legend(ax, show_agn=show_agn and agn_in_row, loc="upper right")
+            if leg is not None: # won't let me add fontsiex in above
+                for text in leg.get_texts():
+                    text.set_fontsize(12)
 
     # Colourbars
     for row in range(nrows):
@@ -848,10 +973,9 @@ def main():
     if args.sphinx_table:
         try:
             sphinx_tab = AstropyTable.read(args.sphinx_table).to_pandas()
-            print_sphinx_columns(sphinx_tab)
-            if "L_lya" in sphinx_tab.columns and "L_ha" in sphinx_tab.columns:
-                sphinx_lya = sphinx_tab["L_lya"].to_numpy(float)
-                sphinx_ha  = sphinx_tab["L_ha"].to_numpy(float)
+            #print_sphinx_columns(sphinx_tab)
+            sphinx_lya = sphinx_tab["obs_lya"].to_numpy(float)
+            sphinx_ha  = sphinx_tab["int_ha"].to_numpy(float)
             print(f"[INFO] SPHINX table loaded: {len(sphinx_tab)} rows")
         except Exception as e:
             print(f"[WARN] Could not load SPHINX table: {e}")

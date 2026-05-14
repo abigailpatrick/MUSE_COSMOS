@@ -106,7 +106,7 @@ FINAL_COLS = [
     "ha_lumin_uncorr", "ha_lumin_err_uncorr",
     "ha_lumin_apcorr", "ha_lumin_err_apcorr",
     "ha_lumin_fullcorr", "ha_lumin_err_fullcorr",
-    "band", "lya_flux", "lya_flux_err", "lya_flux_upper_limit",
+    "band", "lya_flux", "lya_flux_err", "lya_flux_upper_limit", "lya_skew",
     "lya_peak_snr", "lya_detect_flag", "merge_pair",
     "lya_lumin", "lya_lumin_err", "lya_lumin_upper_limit",
     "av_50", "av_16", "av_84", "ebv",
@@ -523,8 +523,8 @@ def main():
     # -----------------------------------------------------------------------
     # 3. Add MUSE Lyα fluxes
     # -----------------------------------------------------------------------
-    lya_cols_fits = ["band", "z_used", "flux_fit", "flux_fit_err", "flux_upper_limit"]
-    lya_cols_new  = ["band", "z_muse", "lya_flux", "lya_flux_err", "lya_flux_upper_limit"]
+    lya_cols_fits = ["band", "z_used", "flux_fit", "flux_fit_err", "flux_upper_limit", "alpha_skew"]
+    lya_cols_new  = ["band", "z_muse", "lya_flux", "lya_flux_err", "lya_flux_upper_limit", "lya_skew"]
     data = read_csv(PATHS["muse_lya"], lya_cols_fits).rename(
         columns=dict(zip(lya_cols_fits, lya_cols_new))
     )
